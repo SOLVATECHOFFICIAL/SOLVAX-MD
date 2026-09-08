@@ -1,126 +1,97 @@
 'use strict';
 
-/*
-|--------------------------------------------------------------------------
-| SOLVAX MD
-| Telegram-controlled WhatsApp Management Bot
-|--------------------------------------------------------------------------
-|
-| Main responsibilities:
-|
-| 1. Start the Telegram bot.
-| 2. Load WhatsApp command modules.
-| 3. Route Telegram commands.
-| 4. Receive phone numbers for /pair.
-| 5. Restore WhatsApp sessions.
-| 6. Route WhatsApp messages to commands.
-| 7. Ensure only the linked WhatsApp account itself can control
-|    its own bot session.
-| 8. Handle shutdown cleanly.
-|
-|--------------------------------------------------------------------------
-*/
-
 const fs = require('fs');
 const path = require('path');
 
 const { Telegraf } = require('telegraf');
 
-const config = require('./config.json');
+const configPath = path.join(
+    __dirname,
+    'config.json'
+);
 
-const {
-    getText,
-    commandParts,
-    jidNumber,
-    isGroupJid
-} = require('./lib/helpers');
+if (!fs.existsSync(configPath)) {
+    throw new Error(
+        'config.json was not found.'
+    );
+}
 
-const {
-    createWhatsAppSession,
-    stopWhatsAppSession,
-    getWhatsAppSession,
-    sendReply,
-    restoreSessions
-} = require('./lib/whatsapp');
-
-const {
-    handlePairNumber
-} = require('./telegram/pair');
+const config = require(configPath);
 
 /*
 |--------------------------------------------------------------------------
-| CONFIGURATION
+| CONFIG
 |--------------------------------------------------------------------------
 */
 
-const TELEGRAM_TOKEN = String(
-    config.telegramToken ||
-    config.botToken ||
-    config.token ||
-    process.env.BOT_TOKEN ||
-    process.env.TELEGRAM_BOT_TOKEN ||
-    ''
-).trim();
+const BOT_TOKEN =
+    String(
+        config.telegramToken ||
+        config.botToken ||
+        config.token ||
+        process.env.BOT_TOKEN ||
+        process.env.TELEGRAM_BOT_TOKEN ||
+        ''
+    ).trim();
 
-const PREFIX = String(
-    config.prefix ||
-    '.'
-).trim() || '.';
-
-/*
- * Telegram polling is the simplest deployment method for Railway,
- * Render, VPS, etc.
- */
-const BOT_NAME = 'SOLVAX MD';
-
-/*
-|--------------------------------------------------------------------------
-| BASIC VALIDATION
-|--------------------------------------------------------------------------
-*/
-
-if (!TELEGRAM_TOKEN) {
-    console.error(
-        '❌ Telegram bot token is missing.'
+if (!BOT_TOKEN) {
+    throw new Error(
+        'Telegram bot token is missing. Put it in config.json or BOT_TOKEN.'
     );
-
-    console.error(
-        'Add "telegramToken" to config.json or set TELEGRAM_BOT_TOKEN.'
-    );
-
-    process.exit(1);
 }
 
 /*
 |--------------------------------------------------------------------------
 | GLOBAL STATE
 |--------------------------------------------------------------------------
-|
-| These objects are deliberately created once.
-|
-| Other modules such as pair.js and whatsapp.js use these references.
-|
-|--------------------------------------------------------------------------
 */
 
 global.sessions =
-    global.sessions ||
-    {};
+    global.sessions || {};
 
 global.pairingStates =
-    global.pairingStates ||
-    {};
+    global.pairingStates || {};
 
 global.commands =
-    global.commands ||
-    {};
+    global.commands || {};
 
-global.bot = null;
+global.bot =
+    global.bot || null;
 
 /*
- * Used to prevent shutdown from being executed multiple times.
- */
-let shuttingDown = false;
+|--------------------------------------------------------------------------
+| MODULES
+|--------------------------------------------------------------------------
+*/
+
+const {
+    getText,
+    commandParts,
+    jidNumber
+} = require('./lib/helpers');
+
+const {
+    getWhatsAppSession,
+    getWhatsAppStatus,
+    restoreSessions,
+    stopAllWhatsAppSessions,
+    sendReply
+} = require('./lib/whatsapp');
+
+const pairModule =
+    require('./telegram/pair');
+
+const pairCommand =
+    pairModule;
+
+const {
+    handlePairNumber,
+    cancelPairing,
+    getPairingStatus
+} = pairModule;
+
+const stopCommand =
+    require('./telegram/stop');
 
 /*
 |--------------------------------------------------------------------------
@@ -128,9 +99,10 @@ let shuttingDown = false;
 |--------------------------------------------------------------------------
 */
 
-const bot = new Telegraf(
-    TELEGRAM_TOKEN
-);
+const bot =
+    new Telegraf(
+        BOT_TOKEN
+    );
 
 global.bot = bot;
 
@@ -142,7 +114,10 @@ global.bot = bot;
 
 function loadWhatsAppCommands() {
     const commandsDir =
-        path.join(__dirname, 'commands');
+        path.join(
+            __dirname,
+            'commands'
+        );
 
     if (!fs.existsSync(commandsDir)) {
         console.warn(
@@ -153,52 +128,56 @@ function loadWhatsAppCommands() {
     }
 
     const files =
-        fs.readdirSync(commandsDir)
-            .filter(file => file.endsWith('.js'))
-            .sort();
+        fs.readdirSync(
+            commandsDir
+        );
 
-    let loaded = 0;
+    for (
+        const file of files
+    ) {
+        if (
+            !file.endsWith('.js')
+        ) {
+            continue;
+        }
 
-    for (const file of files) {
-        const fullPath =
-            path.join(commandsDir, file);
+        const filePath =
+            path.join(
+                commandsDir,
+                file
+            );
 
         try {
-            /*
-             * Delete cached copy so a restart/reload does not retain
-             * an old module.
-             */
             delete require.cache[
-                require.resolve(fullPath)
+                require.resolve(filePath)
             ];
 
-            const commandModule =
-                require(fullPath);
+            const command =
+                require(filePath);
 
             if (
-                typeof commandModule !== 'function'
+                typeof command !== 'function'
             ) {
                 console.warn(
-                    `[COMMANDS] Skipping ${file}: module does not export a function.`
+                    `[COMMANDS] ${file} does not export a function.`
                 );
 
                 continue;
             }
 
-            const commandName =
+            const name =
                 path.basename(
                     file,
                     '.js'
                 ).toLowerCase();
 
-            global.commands[commandName] =
-                commandModule;
-
-            loaded++;
+            global.commands[name] =
+                command;
 
             console.log(
-                `[COMMANDS] Loaded .${commandName}`
+                `[COMMANDS] Loaded .${name}`
             );
+
         } catch (error) {
             console.error(
                 `[COMMANDS] Failed to load ${file}`,
@@ -206,225 +185,561 @@ function loadWhatsAppCommands() {
             );
         }
     }
-
-    console.log(
-        `[COMMANDS] ${loaded} command(s) loaded.`
-    );
 }
 
 /*
 |--------------------------------------------------------------------------
 | COMMAND ALIASES
 |--------------------------------------------------------------------------
-|
-| This allows command files to have one canonical name while users
-| can still use common aliases.
+*/
+
+function registerCommandAliases() {
+    const commands =
+        global.commands;
+
+    const aliases = {
+        menu: [
+            'help'
+        ],
+
+        sticker: [
+            's'
+        ],
+
+        play: [
+            'song',
+            'music'
+        ],
+
+        video: [
+            'ytvideo'
+        ],
+
+        groupinfo: [
+            'ginfo'
+        ],
+
+        tagall: [
+            'everyone'
+        ],
+
+        tagadmin: [
+            'admins'
+        ]
+    };
+
+    for (
+        const [main, names]
+        of Object.entries(aliases)
+    ) {
+        if (
+            typeof commands[main] !== 'function'
+        ) {
+            continue;
+        }
+
+        for (
+            const alias
+            of names
+        ) {
+            commands[alias] =
+                commands[main];
+        }
+    }
+}
+
+/*
+|--------------------------------------------------------------------------
+| COMMAND RESOLVER
 |--------------------------------------------------------------------------
 */
 
-function resolveCommand(command) {
-    const normalized =
-        String(command || '')
+function resolveCommand(name) {
+    const commandName =
+        String(
+            name || ''
+        )
             .trim()
             .toLowerCase();
 
-    if (!normalized) {
+    if (!commandName) {
         return null;
     }
 
-    /*
-     * Direct command.
-     */
-    if (
-        typeof global.commands[normalized] === 'function'
-    ) {
-        return {
-            name: normalized,
-            handler: global.commands[normalized]
-        };
-    }
-
-    /*
-     * Optional aliases.
-     */
-    const aliases = {
-        menu: 'menu',
-        help: 'menu',
-
-        p: 'ping',
-
-        group: 'groupinfo',
-        info: 'groupinfo',
-
-        admins: 'tagadmin',
-        tagadmins: 'tagadmin',
-
-        tag: 'tagall',
-
-        addmember: 'add',
-        remove: 'kick',
-
-        ban: 'kick',
-
-        promoteadmin: 'promote',
-        demoteadmin: 'demote'
-    };
-
-    const mapped =
-        aliases[normalized];
-
-    if (
-        mapped &&
-        typeof global.commands[mapped] === 'function'
-    ) {
-        return {
-            name: mapped,
-            handler: global.commands[mapped]
-        };
-    }
-
-    return null;
-}
-
-/*
-|--------------------------------------------------------------------------
-| TELEGRAM USER ID
-|--------------------------------------------------------------------------
-*/
-
-function telegramUserId(ctx) {
-    return String(
-        ctx?.from?.id || ''
+    return (
+        global.commands[commandName] ||
+        null
     );
 }
 
 /*
 |--------------------------------------------------------------------------
-| TELEGRAM COMMAND TEXT
+| WHATSAPP COMMAND CONTEXT
 |--------------------------------------------------------------------------
 */
 
-function telegramText(ctx) {
-    return String(
-        ctx?.message?.text ||
-        ''
-    ).trim();
+function buildWhatsAppContext(
+    userId,
+    session,
+    msg,
+    parsed,
+    command
+) {
+    const remoteJid =
+        msg?.key?.remoteJid || '';
+
+    return {
+        userId: String(userId),
+
+        session,
+
+        socket:
+            session?.socket || null,
+
+        bot:
+
+            session?.socket || null,
+
+        msg,
+
+        message: msg,
+
+        key:
+            msg?.key || null,
+
+        remoteJid,
+
+        jid:
+            remoteJid,
+
+        isGroup:
+            remoteJid.endsWith(
+                '@g.us'
+            ),
+
+        isFromMe:
+            msg?.key?.fromMe === true,
+
+        command:
+            parsed.command,
+
+        args:
+            parsed.args,
+
+        text:
+            parsed.text,
+
+        body:
+            parsed.text,
+
+        prefix: '.',
+
+        commandName:
+            parsed.command,
+
+        reply: async (
+            text,
+            options = {}
+        ) => {
+            if (
+                !session?.socket
+            ) {
+                return null;
+            }
+
+            return sendReply(
+                session,
+                remoteJid,
+                String(text || ''),
+                options
+            );
+        },
+
+        send: async (
+            text,
+            options = {}
+        ) => {
+            if (
+                !session?.socket
+            ) {
+                return null;
+            }
+
+            return sendReply(
+                session,
+                remoteJid,
+                String(text || ''),
+                options
+            );
+        },
+
+        sendMessage: async (
+            jid,
+            content,
+            options = {}
+        ) => {
+            if (
+                !session?.socket
+            ) {
+                return null;
+            }
+
+            return session.socket.sendMessage(
+                jid || remoteJid,
+                content,
+                options
+            );
+        },
+
+        react: async (
+            emoji
+        ) => {
+            if (
+                !session?.socket ||
+                !msg?.key
+            ) {
+                return null;
+            }
+
+            return session.socket.sendMessage(
+                remoteJid,
+                {
+                    react: {
+                        text:
+                            String(
+                                emoji || ''
+                            ),
+                        key:
+                            msg.key
+                    }
+                }
+            );
+        },
+
+        downloadMedia: async () => {
+            /*
+             * Commands that need media should use Baileys directly
+             * with the message object.
+             *
+             * This placeholder prevents a misleading fake download
+             * implementation from silently doing the wrong thing.
+             */
+
+            throw new Error(
+                'downloadMedia is not implemented in the command context.'
+            );
+        }
+    };
 }
 
 /*
 |--------------------------------------------------------------------------
-| SAFE TELEGRAM REPLY
+| WHATSAPP COMMAND HANDLER
+|--------------------------------------------------------------------------
+|
+| ONLY messages sent by the linked WhatsApp account itself are
+| allowed to reach command files.
+|
+| This is checked twice:
+|
+| 1. lib/whatsapp.js checks msg.key.fromMe
+| 2. This function checks it again
+|
+| Defense in depth is useful here because this is a self-bot.
 |--------------------------------------------------------------------------
 */
 
-async function telegramReply(ctx, text, extra = {}) {
-    try {
-        return await ctx.reply(
-            String(text || ''),
-            extra
+async function handleWhatsAppCommand(
+    userId,
+    session,
+    msg
+) {
+    const key =
+        String(userId || '');
+
+    if (!key) {
+        return;
+    }
+
+    /*
+     * ------------------------------------------------------------
+     * SESSION OWNERSHIP
+     * ------------------------------------------------------------
+     */
+
+    const currentSession =
+        getWhatsAppSession(key);
+
+    if (
+        !currentSession ||
+        currentSession !== session
+    ) {
+        return;
+    }
+
+    /*
+     * ------------------------------------------------------------
+     * STOPPED SESSION
+     * ------------------------------------------------------------
+     */
+
+    if (
+        session.stopping
+    ) {
+        return;
+    }
+
+    /*
+     * ------------------------------------------------------------
+     * ONLY SELF-SENT MESSAGES
+     * ------------------------------------------------------------
+     */
+
+    if (
+        msg?.key?.fromMe !== true
+    ) {
+        return;
+    }
+
+    /*
+     * ------------------------------------------------------------
+     * CHAT JID
+     * ------------------------------------------------------------
+     */
+
+    const remoteJid =
+        String(
+            msg?.key?.remoteJid || ''
         );
+
+    if (!remoteJid) {
+        return;
+    }
+
+    /*
+     * WhatsApp status/broadcast traffic is not a command chat.
+     */
+
+    if (
+        remoteJid ===
+            'status@broadcast' ||
+        remoteJid.endsWith(
+            '@broadcast'
+        )
+    ) {
+        return;
+    }
+
+    /*
+     * ------------------------------------------------------------
+     * MESSAGE TEXT
+     * ------------------------------------------------------------
+     */
+
+    const originalText =
+        getText(
+            msg?.message
+        );
+
+    if (!originalText) {
+        return;
+    }
+
+    let text =
+        originalText.trim();
+
+    /*
+     * ------------------------------------------------------------
+     * SUPPORT:
+     *
+     * .menu
+     * menu
+     *
+     * Both can work.
+     *
+     * A random person cannot trigger either because fromMe was
+     * already required above.
+     * ------------------------------------------------------------
+     */
+
+    if (
+        !text.startsWith('.')
+    ) {
+        const firstWord =
+            text
+                .split(/\s+/)[0]
+                .toLowerCase();
+
+        const directCommand =
+            resolveCommand(
+                firstWord
+            );
+
+        if (!directCommand) {
+            return;
+        }
+
+        text =
+            `.${text}`;
+    }
+
+    /*
+     * ------------------------------------------------------------
+     * PARSE COMMAND
+     * ------------------------------------------------------------
+     */
+
+    const parsed =
+        commandParts(
+            text,
+            '.'
+        );
+
+    if (!parsed) {
+        return;
+    }
+
+    const command =
+        resolveCommand(
+            parsed.command
+        );
+
+    if (
+        typeof command !== 'function'
+    ) {
+        return;
+    }
+
+    /*
+     * ------------------------------------------------------------
+     * COMMAND CONTEXT
+     * ------------------------------------------------------------
+     */
+
+    const ctx =
+        buildWhatsAppContext(
+            key,
+            session,
+            msg,
+            parsed,
+            command
+        );
+
+    /*
+     * ------------------------------------------------------------
+     * RUN COMMAND
+     * ------------------------------------------------------------
+     */
+
+    try {
+        await command(
+            ctx
+        );
+
     } catch (error) {
         console.error(
-            '[TELEGRAM REPLY]',
+            `[WA COMMAND .${parsed.command}]`,
             error?.stack || error
         );
 
-        return null;
+        /*
+         * Do not expose raw stack traces to WhatsApp.
+         */
+
+        try {
+            await ctx.reply(
+                '❌ Command failed.\n\n' +
+                'An internal error occurred while processing the command.'
+            );
+        } catch (replyError) {
+            console.error(
+                '[WA COMMAND ERROR REPLY]',
+                replyError?.stack ||
+                replyError
+            );
+        }
     }
 }
 
+global.handleWhatsAppCommand =
+    handleWhatsAppCommand;
+
 /*
 |--------------------------------------------------------------------------
-| /START
+| TELEGRAM /START
 |--------------------------------------------------------------------------
 */
 
-bot.start(async ctx => {
-    const userId =
-        telegramUserId(ctx);
+bot.start(
+    async ctx => {
+        const userId =
+            String(
+                ctx?.from?.id || ''
+            );
 
-    const session =
-        getWhatsAppSession(userId);
+        await ctx.reply(
+            '🤖 SOLVAX MD\n\n' +
+            'Telegram-controlled WhatsApp self-bot.\n\n' +
 
-    const pairing =
-        global.pairingStates[userId];
+            '📱 /pair\n' +
+            'Link a WhatsApp account.\n\n' +
 
-    let status =
-        '🔴 WhatsApp: Not paired';
+            '📊 /status\n' +
+            'Check WhatsApp connection.\n\n' +
 
-    if (session) {
-        const connected =
-            session.connection === 'open';
+            '🛑 /stop\n' +
+            'Completely stop and clear the WhatsApp session.\n\n' +
 
-        status =
-            connected
-                ? '🟢 WhatsApp: Connected'
-                : '🟡 WhatsApp: Session exists but is not currently connected';
-    } else if (
-        pairing?.active
-    ) {
-        status =
-            '🟡 WhatsApp: Pairing in progress';
+            'ℹ️ /help\n' +
+            'Show available commands.'
+        );
+
+        console.log(
+            `[TELEGRAM START] ${userId}`
+        );
     }
-
-    await telegramReply(
-        ctx,
-        `🤖 ${BOT_NAME}\n\n` +
-        'Telegram control panel for your linked WhatsApp account.\n\n' +
-        `${status}\n\n` +
-        'Commands:\n' +
-        '/pair - Link a WhatsApp account\n' +
-        '/status - Check connection\n' +
-        '/stop - Stop the WhatsApp session\n' +
-        '/help - Show help'
-    );
-});
+);
 
 /*
 |--------------------------------------------------------------------------
-| /HELP
+| TELEGRAM /HELP
 |--------------------------------------------------------------------------
 */
 
-bot.help(async ctx => {
-    await telegramReply(
-        ctx,
-        `🤖 ${BOT_NAME} HELP\n\n` +
-        'WhatsApp pairing:\n' +
-        '/pair\n' +
-        'Start a new WhatsApp pairing operation.\n\n' +
+bot.help(
+    async ctx => {
+        await ctx.reply(
+            '🤖 SOLVAX MD HELP\n\n' +
 
-        'Session:\n' +
-        '/status\n' +
-        'Show your WhatsApp connection status.\n\n' +
+            '📱 WhatsApp pairing\n' +
+            '/pair - Start fresh WhatsApp pairing\n\n' +
 
-        '/stop\n' +
-        'Stop the current WhatsApp session or cancel pending pairing.\n\n' +
+            '📊 Session\n' +
+            '/status - Show current WhatsApp status\n' +
+            '/stop - Completely clear the session\n\n' +
 
-        'WhatsApp commands:\n' +
-        `${PREFIX}menu\n` +
-        `${PREFIX}ping\n` +
-        `${PREFIX}groupinfo\n` +
-        `${PREFIX}tagall\n` +
-        `${PREFIX}tagadmin\n` +
-        `${PREFIX}sticker\n` +
-        `${PREFIX}play\n` +
-        `${PREFIX}video\n` +
-        `${PREFIX}lyrics\n` +
-        `${PREFIX}add\n` +
-        `${PREFIX}kick\n` +
-        `${PREFIX}promote\n` +
-        `${PREFIX}demote\n` +
-        `${PREFIX}mute\n` +
-        `${PREFIX}anti\n\n` +
+            '💡 Pairing flow\n' +
+            '1. Send /pair\n' +
+            '2. Send your WhatsApp number\n' +
+            '3. Copy the pairing code\n' +
+            '4. Enter it in WhatsApp Linked Devices\n\n' +
 
-        'Only commands sent by the linked WhatsApp account itself are processed.'
-    );
-});
+            '🔐 Only messages sent by the linked WhatsApp account itself are processed as bot commands.\n\n' +
+
+            'Example WhatsApp commands:\n' +
+            '.menu\n' +
+            '.ping\n' +
+            '.sticker\n' +
+            '.play song name\n' +
+            '.video video name\n' +
+            '.groupinfo'
+        );
+    }
+);
 
 /*
 |--------------------------------------------------------------------------
-| /PAIR
+| TELEGRAM /PAIR
 |--------------------------------------------------------------------------
 */
 
@@ -432,137 +747,29 @@ bot.command(
     'pair',
     async ctx => {
         try {
-            const pairCommand =
-                require('./telegram/pair');
-
-            await pairCommand(ctx);
+            await pairCommand(
+                ctx
+            );
         } catch (error) {
             console.error(
-                '[PAIR COMMAND]',
+                '[TELEGRAM PAIR]',
                 error?.stack || error
             );
 
-            const userId =
-                telegramUserId(ctx);
-
-            /*
-             * If pair.js crashed before creating a usable operation,
-             * don't leave the user permanently locked.
-             */
-            delete global.pairingStates[userId];
-
-            await telegramReply(
-                ctx,
-                '❌ Could not start the pairing operation.\n\n' +
-                'The pairing state has been reset.\n\n' +
-                'Use /pair again.'
-            );
-        }
-    }
-);
-
-/*
-|--------------------------------------------------------------------------
-| /STATUS
-|--------------------------------------------------------------------------
-*/
-
-bot.command(
-    'status',
-    async ctx => {
-        const userId =
-            telegramUserId(ctx);
-
-        const session =
-            getWhatsAppSession(userId);
-
-        const pairing =
-            global.pairingStates[userId];
-
-        if (!session) {
-            if (
-                pairing?.active
-            ) {
-                const stage =
-                    pairing.stage ||
-                    'unknown';
-
-                await telegramReply(
-                    ctx,
-                    '🟡 WhatsApp pairing is in progress.\n\n' +
-                    `Stage: ${stage}\n` +
-                    `Number: ${pairing.phoneNumber || 'Not supplied'}`
+            try {
+                await ctx.reply(
+                    '❌ Pairing could not be started.\n\n' +
+                    'The pairing state has been reset.\n\n' +
+                    'Use /pair to try again.'
                 );
-
-                return;
-            }
-
-            await telegramReply(
-                ctx,
-                '🔴 No active WhatsApp session.\n\n' +
-                'Use /pair to link a WhatsApp account.'
-            );
-
-            return;
+            } catch (_) {}
         }
-
-        const connection =
-            String(
-                session.connection ||
-                'unknown'
-            );
-
-        const connected =
-            connection === 'open';
-
-        const number =
-            session.phoneNumber ||
-            session.user?.id
-                ? jidNumber(
-                    session.phoneNumber ||
-                    session.user?.id
-                )
-                : 'Unknown';
-
-        let message =
-            connected
-                ? '🟢 WhatsApp is connected.'
-                : '🟡 WhatsApp session exists but is not connected.';
-
-        message +=
-            `\n\n📱 Number: ${number}`;
-
-        message +=
-            `\n🔌 Connection: ${connection}`;
-
-        if (
-            session.pairingCode
-        ) {
-            message +=
-                `\n🔐 Pairing code: ${session.pairingCode}`;
-        }
-
-        if (
-            session.lastDisconnectReason
-        ) {
-            message +=
-                `\n⚠️ Last disconnect: ${session.lastDisconnectReason}`;
-        }
-
-        await telegramReply(
-            ctx,
-            message
-        );
     }
 );
 
 /*
 |--------------------------------------------------------------------------
-| /STOP
-|--------------------------------------------------------------------------
-|
-| This handler deliberately imports stop.js rather than duplicating
-| its implementation.
+| TELEGRAM /STOP
 |--------------------------------------------------------------------------
 */
 
@@ -570,376 +777,164 @@ bot.command(
     'stop',
     async ctx => {
         try {
-            const stopCommand =
-                require('./telegram/stop');
-
-            await stopCommand(ctx);
+            await stopCommand(
+                ctx
+            );
         } catch (error) {
             console.error(
-                '[STOP COMMAND]',
+                '[TELEGRAM STOP]',
                 error?.stack || error
             );
 
-            await telegramReply(
-                ctx,
-                '❌ Failed to stop the WhatsApp operation.\n\n' +
-                'Check the server console for details.'
-            );
+            try {
+                await ctx.reply(
+                    '❌ The stop operation encountered an error.'
+                );
+            } catch (_) {}
         }
     }
 );
 
 /*
 |--------------------------------------------------------------------------
-| WHATSAPP COMMAND ROUTER
-|--------------------------------------------------------------------------
-|
-| This function is called by lib/whatsapp.js when a WhatsApp message
-| arrives.
-|
-| SECURITY RULE:
-|
-| Only msg.key.fromMe === true is accepted.
-|
-| This means:
-|
-| Random person -> ignored
-| Group member -> ignored
-| Admin -> ignored
-| Stranger -> ignored
-| Linked account itself -> processed
-|
+| TELEGRAM /STATUS
 |--------------------------------------------------------------------------
 */
 
-async function handleWhatsAppCommand(
-    userId,
-    sock,
-    msg
-) {
-    userId =
-        String(userId || '');
-
-    if (
-        !userId ||
-        !sock ||
-        !msg
-    ) {
-        return false;
-    }
-
-    /*
-     * Session ownership check.
-     */
-    const session =
-        getWhatsAppSession(userId);
-
-    if (!session) {
-        return false;
-    }
-
-    /*
-     * IMPORTANT:
-     *
-     * Do not remove this.
-     *
-     * fromMe means the message was sent by the linked WhatsApp
-     * account itself.
-     */
-    if (
-        msg.key?.fromMe !== true
-    ) {
-        return false;
-    }
-
-    /*
-     * Ignore status broadcasts.
-     */
-    const jid =
-        String(
-            msg.key?.remoteJid ||
-            ''
-        );
-
-    if (!jid) {
-        return false;
-    }
-
-    if (
-        jid === 'status@broadcast'
-    ) {
-        return false;
-    }
-
-    /*
-     * Ignore protocol/system messages.
-     */
-    if (
-        msg.messageStubType
-    ) {
-        return false;
-    }
-
-    const message =
-        msg.message;
-
-    if (!message) {
-        return false;
-    }
-
-    /*
-     * Extract text from normal messages, captions, etc.
-     */
-    const originalText =
-        getText(message);
-
-    if (!originalText) {
-        return false;
-    }
-
-    /*
-     * Ignore whitespace-only messages.
-     */
-    const raw =
-        originalText.trim();
-
-    if (!raw) {
-        return false;
-    }
-
-    /*
-     * Commands normally use ".".
-     *
-     * For convenience we also allow:
-     *
-     * menu
-     * ping
-     *
-     * to behave like:
-     *
-     * .menu
-     * .ping
-     *
-     * Only recognized commands are accepted in this no-prefix mode.
-     */
-    let parsed =
-        commandParts(
-            raw,
-            PREFIX
-        );
-
-    if (!parsed) {
-        /*
-         * No prefix.
-         *
-         * Don't blindly treat every message as a command.
-         */
-        const noPrefixParts =
-            raw
-                .split(/\s+/);
-
-        const possibleCommand =
+bot.command(
+    'status',
+    async ctx => {
+        const userId =
             String(
-                noPrefixParts.shift() ||
-                ''
-            )
-                .toLowerCase();
-
-        const resolved =
-            resolveCommand(
-                possibleCommand
+                ctx?.from?.id || ''
             );
 
-        if (!resolved) {
-            return false;
+        if (!userId) {
+            return;
         }
 
-        parsed = {
-            command: possibleCommand,
-            args: noPrefixParts,
-            text: noPrefixParts.join(' ')
-        };
-    }
+        const sessionStatus =
+            getWhatsAppStatus(
+                userId
+            );
 
-    const resolved =
-        resolveCommand(
-            parsed.command
-        );
-
-    /*
-     * Unknown commands are silently ignored.
-     *
-     * This prevents the bot from replying to every random
-     * ".something" command.
-     */
-    if (!resolved) {
-        return false;
-    }
-
-    /*
-     * Prevent old socket instances from controlling a newly created
-     * session.
-     *
-     * whatsapp.js also performs this check at event level, but doing
-     * it here gives us another protection layer.
-     */
-    if (
-        session.sock &&
-        session.sock !== sock
-    ) {
-        return false;
-    }
-
-    /*
-     * Sender number here is the actual linked account because
-     * fromMe === true.
-     */
-    const senderNumber =
-        jidNumber(
-            msg.key?.participant ||
-            session.phoneNumber ||
-            session.user?.id
-        );
-
-    const isGroup =
-        isGroupJid(jid);
-
-    /*
-     * Command context.
-     *
-     * Individual command files receive this object.
-     */
-    const commandContext = {
-        sock,
-
-        msg,
-
-        jid,
-
-        senderNumber,
-
-        userId,
-
-        isGroup,
-
-        args:
-            Array.isArray(parsed.args)
-                ? parsed.args
-                : [],
-
-        text:
-            String(
-                parsed.text || ''
-            ),
-
-        command:
-            resolved.name,
-
-        prefix:
-            PREFIX,
+        const pairingStatus =
+            getPairingStatus(
+                userId
+            );
 
         /*
-         * Reply to exactly the same WhatsApp chat where the command
-         * was received.
+         * --------------------------------------------------------
+         * NO SESSION
+         * --------------------------------------------------------
          */
-        reply: async response => {
-            return sendReply(
-                sock,
-                jid,
-                response,
-                msg
+
+        if (
+            !sessionStatus.active
+        ) {
+            if (
+                pairingStatus?.active
+            ) {
+                let stage =
+                    pairingStatus.stage ||
+                    'unknown';
+
+                await ctx.reply(
+                    '🟡 Pairing is active.\n\n' +
+                    `Stage: ${stage}\n` +
+                    `Number: ${pairingStatus.phoneNumber || 'Unknown'}\n\n` +
+                    'The WhatsApp session is not connected yet.'
+                );
+
+                return;
+            }
+
+            await ctx.reply(
+                '🔴 No active WhatsApp session.\n\n' +
+                'Use /pair to link a WhatsApp account.'
             );
-        },
 
-        /*
-         * General send helper.
-         */
-        send: async (
-            response,
-            options = {}
-        ) => {
-            return sock.sendMessage(
-                jid,
-                response,
-                {
-                    quoted:
-                        options.quoted === false
-                            ? undefined
-                            : msg,
-
-                    ...options
-                }
-            );
-        }
-    };
-
-    try {
-        await resolved.handler(
-            commandContext
-        );
-
-        return true;
-    } catch (error) {
-        console.error(
-            `[WHATSAPP COMMAND .${resolved.name}]`,
-            error?.stack || error
-        );
-
-        /*
-         * Don't expose stack traces or internal errors to WhatsApp.
-         */
-        try {
-            await sendReply(
-                sock,
-                jid,
-                '❌ An error occurred while running this command.',
-                msg
-            );
-        } catch (replyError) {
-            console.error(
-                '[COMMAND ERROR REPLY]',
-                replyError?.stack || replyError
-            );
+            return;
         }
 
-        return false;
+        /*
+         * --------------------------------------------------------
+         * ACTIVE SESSION
+         * --------------------------------------------------------
+         */
+
+        const number =
+            sessionStatus.phoneNumber
+                ? jidNumber(
+                    sessionStatus.phoneNumber
+                )
+                : 'Unknown';
+
+        let stateText =
+            '🔴 Disconnected';
+
+        if (
+            sessionStatus.connected
+        ) {
+            stateText =
+                '🟢 Connected';
+        } else if (
+            sessionStatus.connecting
+        ) {
+            stateText =
+                '🟡 Connecting';
+        } else if (
+            sessionStatus.reconnecting
+        ) {
+            stateText =
+                '🟠 Reconnecting';
+        }
+
+        let message =
+            '📊 SOLVAX MD STATUS\n\n' +
+
+            `Status: ${stateText}\n` +
+            `WhatsApp: ${number}\n`;
+
+        if (
+            sessionStatus.connectedAt
+        ) {
+            message +=
+                `Connected at: ${new Date(
+                    sessionStatus.connectedAt
+                ).toLocaleString()}\n`;
+        }
+
+        if (
+            sessionStatus.reconnectAttempts
+        ) {
+            message +=
+                `Reconnect attempts: ${sessionStatus.reconnectAttempts}\n`;
+        }
+
+        if (
+            sessionStatus.lastError
+        ) {
+            message +=
+                `Last error: ${sessionStatus.lastError}\n`;
+        }
+
+        await ctx.reply(
+            message
+        );
     }
-}
+);
 
 /*
 |--------------------------------------------------------------------------
-| MAKE ROUTER AVAILABLE TO WHATSAPP MODULE
-|--------------------------------------------------------------------------
-*/
-
-global.handleWhatsAppCommand =
-    handleWhatsAppCommand;
-
-/*
-|--------------------------------------------------------------------------
-| GLOBAL TELEGRAM TEXT HANDLER
+| TELEGRAM TEXT HANDLER
 |--------------------------------------------------------------------------
 |
-| THIS IS THE IMPORTANT FIX.
-|
-| When the user does:
+| This catches a phone number after:
 |
 | /pair
 |
-| pair.js creates:
-|
-| pairingStates[userId].stage = "waiting_number"
-|
-| Then the next ordinary Telegram text:
-|
-| 2349063285877
-|
-| reaches THIS handler.
-|
-| It is passed to handlePairNumber().
-|
-| No dynamic bot.on('text') listener is required.
-|
+| It deliberately does NOT intercept normal Telegram messages.
 |--------------------------------------------------------------------------
 */
 
@@ -947,92 +942,74 @@ bot.on(
     'text',
     async ctx => {
         const userId =
-            telegramUserId(ctx);
+            String(
+                ctx?.from?.id || ''
+            );
 
         if (!userId) {
             return;
         }
 
         const text =
-            telegramText(ctx);
+            String(
+                ctx?.message?.text || ''
+            ).trim();
 
         if (!text) {
             return;
         }
 
         /*
-         * Telegraf command handlers should handle /pair, /stop,
-         * /status, etc.
+         * Ignore Telegram bot commands.
          *
-         * Do not treat a Telegram command itself as a phone number.
+         * /pair and /stop are handled by their own handlers.
          */
+
         if (
             text.startsWith('/')
         ) {
             return;
         }
 
-        const state =
-            global.pairingStates[userId];
+        const pairingStatus =
+            getPairingStatus(
+                userId
+            );
 
-        /*
-         * No pairing operation waiting for input.
-         */
         if (
-            !state ||
-            !state.active
+            !pairingStatus?.active
         ) {
             return;
         }
 
-        /*
-         * Only consume text while specifically waiting for a number.
-         *
-         * Once pairing has progressed, ordinary Telegram messages
-         * should not restart the pairing operation.
-         */
         if (
-            state.stage !== 'waiting_number'
+            pairingStatus.stage !==
+            'waiting_number'
         ) {
-            return telegramReply(
-                ctx,
-                '⏳ Your pairing operation is already running.\n\n' +
-                `Current stage: ${state.stage || 'unknown'}\n\n` +
-                'Use /stop to cancel it.'
-            );
+            return;
         }
 
         try {
-            /*
-             * handlePairNumber returns true when this message belongs
-             * to the pairing flow.
-             */
-            const consumed =
-                await handlePairNumber(
-                    ctx,
-                    text
-                );
-
-            if (consumed) {
-                return;
-            }
+            await handlePairNumber(
+                ctx,
+                text
+            );
         } catch (error) {
             console.error(
-                '[PAIR NUMBER HANDLER]',
+                '[TELEGRAM PAIR NUMBER]',
                 error?.stack || error
             );
 
-            /*
-             * Reset the state so a failed number handler can never
-             * permanently lock /pair.
-             */
-            delete global.pairingStates[userId];
+            try {
+                await ctx.reply(
+                    '❌ Pairing failed unexpectedly.\n\n' +
+                    'The pairing state has been reset.\n\n' +
+                    'Use /pair to try again.'
+                );
+            } catch (_) {}
 
-            await telegramReply(
-                ctx,
-                '❌ Could not process that phone number.\n\n' +
-                'The pairing state has been reset.\n\n' +
-                'Use /pair to try again.'
+            cancelPairing(
+                userId
             );
         }
     }
@@ -1053,77 +1030,65 @@ bot.catch(
 
         try {
             await ctx.reply(
-                '❌ Telegram bot error.\n\n' +
-                'Please try the command again.'
+                '❌ An internal Telegram bot error occurred.'
             );
-        } catch (replyError) {
-            console.error(
-                '[TELEGRAM ERROR REPLY]',
-                replyError?.stack || replyError
-            );
-        }
+        } catch (_) {}
     }
 );
 
 /*
 |--------------------------------------------------------------------------
-| BOT STARTUP
+| START BOT
 |--------------------------------------------------------------------------
 */
 
+let shuttingDown = false;
+
 async function startBot() {
     /*
-     * Load WhatsApp commands before accepting traffic.
+     * Load WhatsApp commands before Telegram starts receiving traffic.
      */
+
     loadWhatsAppCommands();
 
-    console.log(
-        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
-    );
+    registerCommandAliases();
 
     console.log(
-        `🤖 Starting ${BOT_NAME}...`
-    );
-
-    console.log(
-        `⚙️ Prefix: ${PREFIX}`
-    );
-
-    console.log(
-        `📦 Commands: ${Object.keys(global.commands).length}`
+        `[COMMANDS] ${Object.keys(
+            global.commands
+        ).length} commands loaded.`
     );
 
     /*
-     * Launch Telegram polling.
+     * Start Telegram polling.
      */
+
     await bot.launch();
 
     console.log(
-        '🟢 Telegram bot is running.'
+        '[TELEGRAM] SOLVAX MD is running.'
     );
 
     /*
-     * Restore saved WhatsApp sessions after Telegram is ready.
+     * Restore saved sessions, if any.
      *
-     * restoreSessions() should safely ignore users whose auth
-     * directories do not exist.
+     * NOTE:
+     * /stop and automatic disconnect cleanup remove the user's
+     * auth directory, so those users will not be resurrected.
      */
+
     try {
         await restoreSessions();
+
+        console.log(
+            '[WHATSAPP] Session restore completed.'
+        );
     } catch (error) {
         console.error(
-            '[RESTORE SESSIONS]',
+            '[WHATSAPP RESTORE]',
             error?.stack || error
         );
     }
-
-    console.log(
-        '🟢 SOLVAX MD is ready.'
-    );
-
-    console.log(
-        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
-    );
 }
 
 /*
@@ -1132,7 +1097,9 @@ async function startBot() {
 |--------------------------------------------------------------------------
 */
 
-async function shutdown(signal) {
+async function shutdown(
+    signal
+) {
     if (shuttingDown) {
         return;
     }
@@ -1140,86 +1107,84 @@ async function shutdown(signal) {
     shuttingDown = true;
 
     console.log(
-        `\n🛑 Received ${signal}. Shutting down...`
+        `[SYSTEM] Received ${signal}. Shutting down...`
     );
 
     /*
-     * Stop Telegram polling/webhook.
+     * Stop Telegram polling.
      */
-    try {
-        bot.stop(signal);
 
-        console.log(
-            '🔴 Telegram bot stopped.'
+    try {
+        bot.stop(
+            signal
         );
     } catch (error) {
         console.error(
-            '[TELEGRAM STOP]',
+            '[TELEGRAM SHUTDOWN]',
             error?.stack || error
         );
     }
 
     /*
-     * Stop all active WhatsApp sockets.
+     * Cancel all pairing timers/states.
      *
-     * IMPORTANT:
-     * stopWhatsAppSession() should close the socket without deleting
-     * authentication unless explicitly requested.
+     * We intentionally preserve WhatsApp authentication during
+     * process shutdown so a server restart can restore a normal
+     * established session.
+     *
+     * This is different from /stop.
+     *
+     * /stop = complete user reset.
+     *
+     * process shutdown = close sockets cleanly.
      */
-    const userIds =
-        Object.keys(
-            global.sessions
-        );
 
-    for (const userId of userIds) {
-        try {
-            await stopWhatsAppSession(
-                userId,
-                {
-                    removeAuth: false
-                }
-            );
-
-            console.log(
-                `[SHUTDOWN] WhatsApp session stopped: ${userId}`
-            );
-        } catch (error) {
-            console.error(
-                `[SHUTDOWN] Failed for ${userId}`,
-                error?.stack || error
-            );
+    try {
+        for (
+            const state
+            of Object.values(
+                global.pairingStates
+            )
+        ) {
+            if (
+                state?.timeout
+            ) {
+                clearTimeout(
+                    state.timeout
+                );
+            }
         }
+
+        global.pairingStates = {};
+    } catch (error) {
+        console.error(
+            '[PAIRING SHUTDOWN]',
+            error?.stack || error
+        );
     }
 
     /*
-     * Clear pending pairing timers/states.
+     * Stop active sockets while keeping auth files.
      */
-    for (
-        const userId of Object.keys(
-            global.pairingStates
-        )
-    ) {
-        const state =
-            global.pairingStates[userId];
 
-        if (
-            state?.timeout
-        ) {
-            clearTimeout(
-                state.timeout
-            );
-        }
-
-        delete global.pairingStates[
-            userId
-        ];
+    try {
+        await stopAllWhatsAppSessions({
+            removeAuth: false
+        });
+    } catch (error) {
+        console.error(
+            '[WHATSAPP SHUTDOWN]',
+            error?.stack || error
+        );
     }
 
     console.log(
-        '🟢 SOLVAX MD shutdown complete.'
+        '[SYSTEM] Shutdown complete.'
     );
 
-    process.exit(0);
+    process.exit(
+        0
+    );
 }
 
 /*
@@ -1231,14 +1196,18 @@ async function shutdown(signal) {
 process.once(
     'SIGINT',
     () => {
-        shutdown('SIGINT');
+        shutdown(
+            'SIGINT'
+        );
     }
 );
 
 process.once(
     'SIGTERM',
     () => {
-        shutdown('SIGTERM');
+        shutdown(
+            'SIGTERM'
+        );
     }
 );
 
@@ -1274,29 +1243,30 @@ process.on(
 |--------------------------------------------------------------------------
 */
 
-startBot()
-    .catch(error => {
+startBot().catch(
+    error => {
         console.error(
-            '❌ SOLVAX MD failed to start:',
+            '[STARTUP FAILED]',
             error?.stack || error
         );
 
-        process.exit(1);
-    });
+        process.exit(
+            1
+        );
+    }
+);
 
 /*
 |--------------------------------------------------------------------------
 | EXPORTS
 |--------------------------------------------------------------------------
-|
-| Exporting these makes the router usable in tests or by another
-| module without starting another Telegram bot instance.
-|--------------------------------------------------------------------------
 */
 
 module.exports = {
     bot,
-    handleWhatsAppCommand,
     loadWhatsAppCommands,
-    resolveCommand
+    resolveCommand,
+    handleWhatsAppCommand,
+    startBot,
+    shutdown
 };
