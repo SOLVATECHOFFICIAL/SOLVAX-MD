@@ -116,28 +116,22 @@ function normalizePhoneNumber(input) {
         return null;
     }
 
-    // Remove spaces, brackets, hyphens and other formatting.
     value = value.replace(/[^\d+]/g, '');
 
-    // Convert 00XXXXXXXX to +XXXXXXXX.
     if (value.startsWith('00')) {
         value = '+' + value.slice(2);
     }
 
-    // Nigerian local number:
-    // 08012345678 -> +2348012345678
     if (value.startsWith('0') && !value.startsWith('00')) {
         value = '+234' + value.slice(1);
     }
 
-    // Remove the plus sign.
     value = value.replace(/\D/g, '');
 
     if (!value) {
         return null;
     }
 
-    // International phone numbers are normally 10–15 digits.
     if (value.length < 10 || value.length > 15) {
         return null;
     }
@@ -203,20 +197,16 @@ async function waitForPairingCode(
     const started = Date.now();
 
     while (Date.now() - started < timeout) {
-
-        // Check the session returned by createWhatsAppSession().
         if (session?.pairingCode) {
             return session.pairingCode;
         }
 
-        // Check the currently registered WhatsApp session.
         const currentSession = getWhatsAppSession(key);
 
         if (currentSession?.pairingCode) {
             return currentSession.pairingCode;
         }
 
-        // Check the shared pairing state.
         const state = getState(key);
 
         if (state?.pairingCode) {
@@ -295,11 +285,6 @@ async function handlePairNumber(ctx) {
         );
     }
 
-    /*
-     * Only accept a phone number while waiting for one.
-     * This prevents duplicate session creation when the
-     * user sends multiple messages.
-     */
     if (state.status !== 'waiting_number') {
         if (
             state.status === 'creating_session' ||
@@ -355,11 +340,6 @@ async function handlePairNumber(ctx) {
             status: 'requesting_code'
         });
 
-        /*
-         * createWhatsAppSession expects:
-         *
-         * createWhatsAppSession(userId, phoneNumber, options)
-         */
         const session = await createWhatsAppSession(
             key,
             phoneNumber,
@@ -408,10 +388,6 @@ async function handlePairNumber(ctx) {
             pairingCode
         );
 
-        /*
-         * WhatsApp connection handling is responsible for
-         * detecting the final successful connection.
-         */
         setState(key, {
             status: 'waiting_connection'
         });
@@ -528,7 +504,3 @@ module.exports = {
     normalizePhoneNumber,
     waitForPairingCode
 };
-
-Important: this fixes "telegram/pair.js", but there is still one required change in "index.js": "/pair" must call "beginPairing(ctx)", not "pairCommand(ctx)", because the module exports an object containing "beginPairing".
-
-So the next file to replace should be "index.js", specifically its Telegram "/pair" handling.
