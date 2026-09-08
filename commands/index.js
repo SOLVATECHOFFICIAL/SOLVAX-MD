@@ -1,6 +1,5 @@
 'use strict';
 
-// Import all command handlers
 const menu = require('./menu');
 const ping = require('./ping');
 const vv = require('./vv');
@@ -18,20 +17,11 @@ const demote = require('./demote');
 const mute = require('./mute');
 const anti = require('./anti');
 
-/**
- * Main WhatsApp command router.
- * Called by lib/whatsapp.js for each incoming message.
- *
- * @param {string} userId - The user's session ID
- * @param {object} session - The session object (socket, status, etc.)
- * @param {object} msg - The WhatsApp message object
- */
 async function handleWhatsAppCommand(userId, session, msg) {
     const sock = session.socket;
     const jid = msg.key?.remoteJid;
     if (!jid || !sock) return;
 
-    // Extract text and sender info
     const text = msg.message?.conversation ||
                  msg.message?.extendedTextMessage?.text ||
                  '';
@@ -40,14 +30,14 @@ async function handleWhatsAppCommand(userId, session, msg) {
     const senderJid = msg.key?.participant || jid;
     const isGroup = jid.endsWith('@g.us');
 
+    const command = text.split(' ')[0].toLowerCase();
+
     // Determine reply destination
     const publicCommands = ['.play', '.video', '.lyrics', '.tagall', '.tagadmin',
                            '.add', '.kick', '.promote', '.demote', '.mute', '.lock', '.unlock'];
-    const command = text.split(' ')[0].toLowerCase();
     const isPublic = publicCommands.includes(command) && isGroup;
     const replyJid = isPublic ? jid : senderJid;
 
-    // Helper to send reply
     const sendReply = async (content) => {
         await sock.sendMessage(replyJid, content);
     };
@@ -67,7 +57,6 @@ async function handleWhatsAppCommand(userId, session, msg) {
         return loading;
     };
 
-    // Build context object for command handlers
     const context = {
         sock,
         msg,
@@ -80,13 +69,11 @@ async function handleWhatsAppCommand(userId, session, msg) {
         sendLoading,
         rawText: text,
         text: command,
-        // Helpers from global or lib
         jidNumber: (j) => j.split('@')[0],
         cleanNumber: (n) => String(n).replace(/\D/g, ''),
         fetchBuffer: require('../lib/helpers').fetchBuffer,
         sleep: require('../lib/helpers').sleep,
-        // Admin checks
-        isOwner: senderJid === global.OWNER_NUMBER + '@s.whatsapp.net' || (global.CO_OWNERS || []).includes(senderJid),
+        isOwner: senderJid === global.OWNER_NUMBER + '@s.whatsapp.net' || (global.CO_OWNERS || []).includes(senderJid.split('@')[0]),
         getGroup: async () => {
             if (!isGroup) return null;
             try { return await sock.groupMetadata(jid); } catch { return null; }
@@ -108,34 +95,35 @@ async function handleWhatsAppCommand(userId, session, msg) {
             const botId = sock.user?.id || (await sock.getMe())?.id;
             const participant = group.participants.find(p => p.id === botId);
             return Boolean(participant?.admin);
+        },
+        getMentionedJids: () => {
+            return msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
         }
     };
 
-    // Route to specific command handler
     try {
-        if (text === '.menu') return await menu(context);
-        if (text === '.ping') return await ping(context);
-        if (text === '.vv') return await vv(context);
+        if (command === '.menu') return await menu(context);
+        if (command === '.ping') return await ping(context);
+        if (command === '.vv') return await vv(context);
         if (text.startsWith('.play ')) return await play(context);
         if (text.startsWith('.video ')) return await video(context);
-        if (text === '.sticker') return await sticker(context);
+        if (command === '.sticker') return await sticker(context);
         if (text.startsWith('.lyrics ')) return await lyrics(context);
-        if (text === '.groupinfo') return await groupinfo(context);
-        if (text === '.tagall') return await tagall(context);
-        if (text === '.tagadmin') return await tagadmin(context);
+        if (command === '.groupinfo') return await groupinfo(context);
+        if (command === '.tagall') return await tagall(context);
+        if (command === '.tagadmin') return await tagadmin(context);
         if (text.startsWith('.add ')) return await add(context);
         if (text.startsWith('.kick ')) return await kick(context);
         if (text.startsWith('.promote ')) return await promote(context);
         if (text.startsWith('.demote ')) return await demote(context);
-        if (text === '.mute on' || text === '.lock') return await mute(context, 'on');
-        if (text === '.mute off' || text === '.unlock') return await mute(context, 'off');
-        if (text === '.antilink' || text.startsWith('.antilink ') ||
-            text === '.antimention' || text.startsWith('.antimention ') ||
-            text === '.antiviewonce' || text.startsWith('.antiviewonce ') ||
-            text === '.antibot' || text.startsWith('.antibot ')) {
+        if (command === '.mute on' || command === '.lock') return await mute(context, 'on');
+        if (command === '.mute off' || command === '.unlock') return await mute(context, 'off');
+        if (command === '.antilink' || text.startsWith('.antilink ') ||
+            command === '.antimention' || text.startsWith('.antimention ') ||
+            command === '.antiviewonce' || text.startsWith('.antiviewonce ') ||
+            command === '.antibot' || text.startsWith('.antibot ')) {
             return await anti(context);
         }
-        // If no command matches, ignore.
     } catch (error) {
         console.error(`[COMMAND] Error handling ${command}:`, error);
         try {
