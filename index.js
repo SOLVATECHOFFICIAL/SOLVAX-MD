@@ -76,7 +76,7 @@ function updateAntiSettings(groupId, type, key, value) {
 // ============================================================
 const bot = new Telegraf(BOT_TOKEN);
 const sessions = {};
-const pairingStates = {};
+const pairingStates = {}; // { userId: { step, timestamp, timeoutId } }
 
 // Command queue - first come first serve
 let commandQueue = [];
@@ -195,17 +195,22 @@ bot.command('pair', async (ctx) => {
         `📱 Please send your WhatsApp number with country code.\n` +
         `Example: 2349012345678 (Nigeria)\n` +
         `(No + sign, no leading zero)\n\n` +
-        `⏳ Send your number in the next 30 seconds.`
+        `⏳ Send your number in the next 90 seconds.`
     );
 
-    pairingStates[userId] = { step: 'awaiting_number', timestamp: Date.now() };
-
-    setTimeout(() => {
+    // Set timeout to auto-cancel after 90 seconds
+    const timeoutId = setTimeout(() => {
         if (pairingStates[userId]) {
             delete pairingStates[userId];
             ctx.reply('⏳ Pairing request timed out. Send /pair again to start over.');
         }
-    }, 30000);
+    }, 90000); // 90 seconds
+
+    pairingStates[userId] = {
+        step: 'awaiting_number',
+        timestamp: Date.now(),
+        timeoutId: timeoutId
+    };
 });
 
 // ---------- Handle number input (for /pair) ----------
@@ -214,6 +219,11 @@ bot.on('text', async (ctx) => {
     const text = ctx.message.text.trim();
 
     if (pairingStates[userId] && pairingStates[userId].step === 'awaiting_number') {
+        // Clear the timeout so it doesn't fire after we've received the number
+        if (pairingStates[userId].timeoutId) {
+            clearTimeout(pairingStates[userId].timeoutId);
+        }
+
         const cleanNumber = text.replace(/\D/g, '');
         if (cleanNumber.length < 10 || cleanNumber.length > 15) {
             return ctx.reply('❌ Invalid number. Use format: 2349012345678 (country code + number)');
@@ -237,6 +247,7 @@ bot.on('text', async (ctx) => {
                 browser: ['SolvaX MD', 'Chrome', '1.0.0'],
             });
 
+            // Wait for socket to be ready with timeout
             let socketReady = false;
             let attempts = 0;
             const maxAttempts = 10;
@@ -257,7 +268,7 @@ bot.on('text', async (ctx) => {
             }
 
             const code = await sock.requestPairingCode(cleanNumber);
-            
+
             sessions[userId] = {
                 sock,
                 saveCreds,
@@ -519,7 +530,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // ---------- .play (Music - API only, NO ytdl) ----------
+    // ---------- .play (Music - API only) ----------
     if (text.startsWith('.play ')) {
         const song = text.replace('.play ', '');
         await sendLoading(`⏳ Searching for: ${song}`);
@@ -568,11 +579,10 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
             } catch (e) {}
         }
 
-        // Source 3: Alternative (if any)
+        // Source 3: Alternative (add another)
         if (!success && attempts < maxAttempts) {
             attempts++;
             try {
-                // Another fallback – can add here
                 const apiUrl = `https://api.someother.com/ytmp3?q=${encodeURIComponent(song)}`;
                 const response = await fetch(apiUrl);
                 const data = await response.json();
@@ -648,7 +658,6 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         if (!success && attempts < maxAttempts) {
             attempts++;
             try {
-                // Another fallback
                 const apiUrl = `https://api.someother.com/ytmp4?q=${encodeURIComponent(video)}`;
                 const response = await fetch(apiUrl);
                 const data = await response.json();
