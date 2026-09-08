@@ -1,12 +1,13 @@
-const { requireAdmin } = require('../lib/group');
-
-module.exports = async ctx => {
-  const meta = await requireAdmin(ctx);
-  if (!meta) return;
-  const admins = meta.participants.filter(p => p.admin).map(p => p.id);
-  if (!admins.length) return ctx.reply('ℹ️ No group admins were found.');
-  await ctx.sock.sendMessage(ctx.jid, {
-    text: `🛡 Admins:\n${admins.map(j => `@${j.split('@')[0].split(':')[0]}`).join(' ')}`,
-    mentions: admins
-  }, { quoted: ctx.msg });
+'use strict';
+module.exports = {
+  name: 'tagadmin',
+  async run(ctx) {
+    const g = await ctx.group();
+    const ids = g.participants.filter(p => p.admin).map(p => p.id);
+    if (!ids.length) return ctx.textReply('❌ No admins found.');
+    await ctx.socket.sendMessage(ctx.remoteJid, {
+      text: '🛡️ ' + ids.map(j => '@' + String(j).split('@')[0]).join(' '),
+      mentions: ids
+    });
+  }
 };

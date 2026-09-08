@@ -1,10 +1,17 @@
-const { setGroup, getGroup } = require('../lib/database');
-const { requireAdmin } = require('../lib/group');
-
-module.exports = async ctx => {
-  const meta = await requireAdmin(ctx);
-  if (!meta) return;
-  const next = !getGroup(ctx.jid).muted;
-  setGroup(ctx.jid, { muted: next });
-  await ctx.reply(next ? '🔇 Bot commands are now restricted to group admins.' : '🔊 Bot commands are available to members again.');
+'use strict';
+module.exports = {
+  name: 'mute',
+  async run(ctx) {
+    const g = await ctx.group();
+    if (!g.botIsAdmin) return ctx.textReply('❌ The linked WhatsApp account must be a group admin.');
+    const v = String(ctx.args[0] || '').toLowerCase();
+    if (!['on','off'].includes(v)) return ctx.textReply('Usage: .mute on | .mute off');
+    if (typeof global.setGroup !== 'function')
+      return ctx.textReply('⚠️ Mute is ready, but your database needs a setGroup() writer.');
+    const { getGroup } = require('../lib/database');
+    const s = getGroup(ctx.remoteJid) || {};
+    s.muted = v === 'on';
+    await global.setGroup(ctx.remoteJid, s);
+    await ctx.textReply(`🔒 Group mute: ${v.toUpperCase()}`);
+  }
 };

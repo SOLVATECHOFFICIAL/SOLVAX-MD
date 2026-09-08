@@ -1,11 +1,19 @@
-const { groupMetadata } = require('../lib/group');
+'use strict';
+module.exports = {
+  name: 'groupinfo',
+  async run(ctx) {
+    const g = await ctx.group();
+    const admins = g.participants.filter(p => p.admin);
+    const members = g.participants.map((p,i) =>
+      `${i+1}. +${String(p.id).split('@')[0]}${p.admin ? ' — ADMIN' : ''}`
+    ).join('\n');
+    await ctx.textReply(`╭──〔 GROUP INFO 〕──╮
+│ Name: ${g.metadata.subject || 'Unknown'}
+│ Members: ${g.participants.length}
+│ Admins: ${admins.length}
+│ Bot admin: ${g.botIsAdmin ? 'YES' : 'NO'}
+╰────────────────────╯
 
-module.exports = async ctx => {
-  try {
-    const meta = await groupMetadata(ctx);
-    const admins = meta.participants.filter(p => p.admin).length;
-    await ctx.reply(`👥 ${meta.subject}\n\n🆔 ${meta.id}\n👤 Members: ${meta.participants.length}\n🛡 Admins: ${admins}\n📝 ${meta.desc || 'No description'}`);
-  } catch (error) {
-    await ctx.reply(`❌ ${error?.message || 'Unable to read group information.'}`);
+${members}`);
   }
 };

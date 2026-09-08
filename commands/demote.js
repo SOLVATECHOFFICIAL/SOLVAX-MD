@@ -1,22 +1,12 @@
-const { requireAdmin, resolveTarget } = require('../lib/group');
-
-module.exports = async ctx => {
-  const meta = await requireAdmin(ctx);
-  if (!meta) return;
-
-  const target = resolveTarget(ctx);
-  if (!target) return ctx.reply('Reply to a member or provide a valid number, e.g. .demote 234xxxxxxxxxx');
-
-  const botJid = ctx.sock.user?.id || '';
-  if (target === botJid || target.split('@')[0].split(':')[0] === botJid.split('@')[0].split(':')[0]) {
-    return ctx.reply('❌ The bot account cannot be targeted by this command.');
-  }
-
-  try {
-    await ctx.sock.groupParticipantsUpdate(ctx.jid, [target], 'demote');
-    await ctx.reply('✅ Admin removed.');
-  } catch (e) {
-    console.error('[COMMAND] demote failed:', e);
-    await ctx.reply('❌ The group operation could not be completed. Check the target and the bot permissions.');
+'use strict';
+module.exports = {
+  name: 'demote',
+  async run(ctx) {
+    const g = await ctx.group();
+    if (!g.botIsOwner) return ctx.textReply('❌ Owner-only command.');
+    if (!g.botIsAdmin) return ctx.textReply('❌ The linked WhatsApp account is not an admin.');
+    if (!ctx.mentions.length) return ctx.textReply('Usage: .demote @tag');
+    await ctx.socket.groupParticipantsUpdate(ctx.remoteJid, ctx.mentions, 'demote');
+    await ctx.textReply('✅ Admin demoted.');
   }
 };

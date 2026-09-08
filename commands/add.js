@@ -1,17 +1,18 @@
-const { requireAdmin, normalizeTarget } = require('../lib/group');
-
-module.exports = async ctx => {
-  const meta = await requireAdmin(ctx);
-  if (!meta) return;
-
-  const target = normalizeTarget(ctx.args[0]);
-  if (!target) return ctx.reply('Usage: .add 2349012345678');
-
-  try {
-    await ctx.sock.groupParticipantsUpdate(ctx.jid, [target], 'add');
-    await ctx.reply(`✅ Add request sent for ${target.split('@')[0]}.`);
-  } catch (e) {
-    console.error('[COMMAND] add failed:', e);
-    await ctx.reply('❌ Could not add that number. Make sure the number is valid and can be added to the group.');
+'use strict';
+const { getGroup } = require('../lib/database');
+module.exports = {
+  name: 'add',
+  async run(ctx) {
+    const settings = getGroup(ctx.remoteJid) || {};
+    if (settings.allowAdd === false || settings.add === false)
+      return ctx.textReply('❌ Adding members is disabled in this group.');
+    const n = String(ctx.args[0] || '').replace(/\D/g, '');
+    if (!n) return ctx.textReply('Usage: .add 234xxxxxxxxxx');
+    try {
+      await ctx.socket.groupParticipantsUpdate(ctx.remoteJid, [`${n}@s.whatsapp.net`], 'add');
+      await ctx.textReply(`✅ Add request sent for +${n}.`);
+    } catch (e) {
+      await ctx.textReply(`❌ Add failed: ${e?.message || 'WhatsApp rejected it.'}`);
+    }
   }
 };
