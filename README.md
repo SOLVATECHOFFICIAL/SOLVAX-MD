@@ -1,53 +1,40 @@
-# ⚔️ SOLVAX MD v11
+# SolvaX MD
 
-**Complete WhatsApp Bot** with 19 commands, anti-system, and Telegram pairing.
+A Telegram-controlled WhatsApp bot using Baileys.
 
-> **⚠️ SECURITY NOTICE:** This README contains NO secrets. Your Telegram Bot Token must be set as an environment variable (`BOT_TOKEN`) in your deployment platform (Railway/Render). NEVER commit it to GitHub.
+## Setup
 
----
+1. Install Node.js 20+.
+2. Put your Telegram bot token in the environment as `BOT_TOKEN`.
+3. Run:
 
-## 👑 Owner Info
+```bash
+npm install
+npm start
+```
 
-| Item | Value |
-| :--- | :--- |
-| **Bot Name** | SOLVAX MD |
-| **Owner** | Solomon |
-| **Version** | v11.0.0 |
-| **Country** | Nigeria (234) |
+On Railway, add `BOT_TOKEN` under Variables. The project already contains `railway.json` and a `Procfile`.
 
----
+## Telegram
 
-## 📋 Features
+- `/start`
+- `/help`
+- `/pair`
+- `/status`
+- `/stop`
 
-### 🔹 19 WhatsApp Commands
+For `/pair`, enter the WhatsApp number with country code and digits only, for example `2349012345678`.
 
-| Category | Count | Commands |
-| :--- | :--- | :--- |
-| **Everyone** | 8 | `.menu` `.ping` `.vv` `.play` `.video` `.sticker` `.lyrics` `.groupinfo` |
-| **Admin Force** | 7 | `.tagall` `.tagadmin` `.add` `.kick` `.promote` `.demote` `.mute` (`.lock`/`.unlock`) |
-| **Anti-System** | 4 | `.antilink` `.antimention` `.antiviewonce` `.antibot` |
+## WhatsApp
 
-### 🔹 5 Telegram Commands
+The command prefix is `.`.
 
-| Command | What it does |
-| :--- | :--- |
-| `/start` | Welcome message |
-| `/help` | Full command list |
-| `/pair 234xxx` | Generate WhatsApp pairing code |
-| `/status` | Check WhatsApp connection |
-| `/stop` | Disconnect WhatsApp |
+`.menu`, `.ping`, `.sticker`, `.play`, `.video`, `.lyrics`, `.groupinfo`, `.tagall`, `.tagadmin`, `.add`, `.kick`, `.promote`, `.demote`, `.mute`, `.anti`, `.vv`.
 
-### 🔹 Core Systems
+`.vv` intentionally does not bypass view-once privacy controls.
 
-| System | Description |
-| :--- | :--- |
-| **Database** | JSON file – warnings survive restarts |
-| **Queue** | First-come-first-serve processing |
-| **View-Once** | 5 decryption methods for `.vv` |
-| **Media** | 3 sources for `.play` and `.video` |
-| **Auto-Delete** | Loading messages disappear automatically |
-| **Private/Public** | Smart reply routing |
+## Important deployment note
 
----
+The default auth store is file-based. Railway's filesystem should not be treated as permanent storage for production sessions. If a deployment is recreated, the WhatsApp session files may disappear and require pairing again. For a serious multi-user deployment, move the auth state to durable database/object storage.
 
-## 📂 Project Structure
+Never commit the `sessions/` directory, Telegram token, or WhatsApp credentials.

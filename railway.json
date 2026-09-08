@@ -1,10 +1,7 @@
 {
-  "build": {
-    "builder": "NIXPACKS",
-    "nixPkgs": ["python3", "nodejs", "npm"]
-  },
+  "$schema": "https://railway.app/railway.schema.json",
   "deploy": {
-    "startCommand": "node index.js",
+    "startCommand": "npm start",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }

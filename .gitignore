@@ -1,7 +1,8 @@
 node_modules/
-auth_info/
-auth_tg_*/
-database.json
-*.log
 .env
+*.log
+auth_*/
+sessions/*
+!sessions/.gitkeep
+data/*.json
 .DS_Store

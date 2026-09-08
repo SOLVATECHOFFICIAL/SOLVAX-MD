@@ -1,8 +1,9 @@
 {
-  "ownerNumber": "23409063285877",
-  "botName": "SOLVAX MD",
-  "ownerName": "Solomon",
-  "coOwners": [],
-  "autoDeleteLoading": true,
-  "playSources": 2
+  "botName": "SolvaX MD",
+  "prefix": ".",
+  "ownerIds": [],
+  "maxPairingSeconds": 120,
+  "commandCooldownMs": 700,
+  "youtubeResults": 5,
+  "telegramToken": ""
 }
