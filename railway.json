@@ -1,6 +1,7 @@
 {
   "build": {
-    "builder": "NIXPACKS"
+    "builder": "NIXPACKS",
+    "nixPkgs": ["python3", "nodejs", "npm"]
   },
   "deploy": {
     "startCommand": "node index.js",
