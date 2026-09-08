@@ -7,7 +7,7 @@ module.exports = async ctx => {
 │ .sticker     Image → sticker
 │ .play        Search YouTube
 │ .video       Search YouTube
-│ .lyrics      Find lyrics
+│ .lyrics      Search lyrics
 │
 │ GROUP TOOLS
 │ .groupinfo
@@ -20,7 +20,5 @@ module.exports = async ctx => {
 │ .mute
 │ .anti
 │
-╰────────────────────╯
-
-Use .help? No. Humanity has enough help menus already. 😐`);
+╰────────────────────╯`);
 };

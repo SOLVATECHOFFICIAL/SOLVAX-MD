@@ -1,6 +1,6 @@
 const { downloadMediaMessage } = require('@whiskeysockets/baileys');
 const sharp = require('sharp');
-const { getMediaType, unwrapMessage } = require('../lib/helpers');
+const { getMediaType } = require('../lib/helpers');
 
 module.exports = async ctx => {
   const type = getMediaType(ctx.msg.message);
@@ -16,6 +16,7 @@ module.exports = async ctx => {
       .toBuffer();
     await ctx.sock.sendMessage(ctx.jid, { sticker: webp }, { quoted: ctx.msg });
   } catch (error) {
-    await ctx.reply(`❌ Sticker conversion failed: ${error.message}`);
+    console.error('[COMMAND] sticker failed:', error);
+    await ctx.reply('❌ Sticker conversion failed. Please send a valid image and try again.');
   }
 };
