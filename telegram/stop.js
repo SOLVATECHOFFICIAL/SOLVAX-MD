@@ -3,10 +3,7 @@ const {
     getWhatsAppSession
 } = require('../lib/whatsapp');
 
-const {
-    getPairingStatus,
-    cancelPairing
-} = require('./pair');
+const { getPairingStatus } = require('./pair');
 
 module.exports = async (ctx) => {
     const userId = String(ctx.from.id);
@@ -15,10 +12,7 @@ module.exports = async (ctx) => {
         const beforePairing = getPairingStatus(userId);
         const beforeSession = getWhatsAppSession(userId);
 
-        // Always cancel any active pairing state first.
-        await cancelPairing(userId);
-
-        // Completely wipe the user's WhatsApp state.
+        // Completely wipe the user's WhatsApp state, including any active pairing.
         // This intentionally removes saved auth so /pair starts fresh.
         await completelyResetUser(userId, {
             notify: false

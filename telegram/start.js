@@ -5,6 +5,7 @@ module.exports = async ctx => {
     `*SolvaX MD* controls a WhatsApp session from Telegram.\n\n` +
     `Commands:\n` +
     `/pair - link a WhatsApp number\n` +
+    `/cancel - cancel an active pairing request\n` +
     `/status - check your session\n` +
     `/stop - stop and remove your session\n` +
     `/help - show help`,

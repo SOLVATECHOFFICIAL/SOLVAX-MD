@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const { sleep } = require('../lib/helpers');
 const {
     createWhatsAppSession,
@@ -5,48 +7,40 @@ const {
     completelyResetUser
 } = require('../lib/whatsapp');
 
-const WAITING_TIMEOUT = 2 * 60 * 1000;
+let configuredPairingSeconds = 300;
+try {
+    const configPath = path.join(process.cwd(), 'config.json');
+    if (fs.existsSync(configPath)) {
+        const config = require(configPath);
+        configuredPairingSeconds = Number(config.maxPairingSeconds) || configuredPairingSeconds;
+    }
+} catch (_) {}
+const WAITING_TIMEOUT = Math.max(30, configuredPairingSeconds) * 1000;
 
 /* =========================================================
-   GLOBAL PAIRING STATE
+   SHARED PAIRING STATE
 ========================================================= */
 
-function getPairingStates() {
-    if (!global.pairingStates) {
-        global.pairingStates = {};
-    }
-
-    return global.pairingStates;
-}
-
 function getState(userId) {
-    return getPairingStates()[String(userId)] || null;
+    return global.pairingStates?.[String(userId)] || null;
 }
 
 function setState(userId, data) {
-    const states = getPairingStates();
     const key = String(userId);
-
-    states[key] = {
-        ...(states[key] || {}),
+    const state = global.pairingStates?.[key] || {};
+    global.pairingStates[key] = {
+        ...state,
         ...data,
         updatedAt: Date.now()
     };
-
-    return states[key];
+    return global.pairingStates[key];
 }
 
 function clearState(userId) {
-    const states = getPairingStates();
     const key = String(userId);
-
-    const state = states[key];
-
-    if (state?.timeout) {
-        clearTimeout(state.timeout);
-    }
-
-    delete states[key];
+    const state = getState(key);
+    if (state?.timeout) clearTimeout(state.timeout);
+    if (global.pairingStates) delete global.pairingStates[key];
 }
 
 /* =========================================================
@@ -243,7 +237,8 @@ async function beginPairing(ctx) {
 
     setState(key, {
         status: 'waiting_number',
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        chatId: ctx.chat?.id || null
     });
 
     await ctx.reply(
@@ -375,8 +370,6 @@ async function handlePairNumber(ctx) {
             status: 'waiting_code'
         });
 
-        refreshPairingTimeout(ctx, key);
-
         /*
          * The corrected whatsapp.js returns pairingCode
          * directly on the session object.
@@ -384,7 +377,7 @@ async function handlePairNumber(ctx) {
         const pairingCode = await waitForPairingCode(
             key,
             session,
-            20000
+            60000
         );
 
         if (!pairingCode) {
@@ -409,7 +402,6 @@ async function handlePairNumber(ctx) {
             status: 'waiting_connection'
         });
 
-        refreshPairingTimeout(ctx, key);
 
     } catch (error) {
         console.error(

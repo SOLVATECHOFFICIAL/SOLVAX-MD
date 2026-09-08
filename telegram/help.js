@@ -2,6 +2,7 @@ module.exports = async ctx => {
   await ctx.reply(
     `🛠 Telegram controls\n\n` +
     `/pair - link a WhatsApp number\n` +
+    `/cancel - cancel an active pairing request\n` +
     `/status - check your session\n` +
     `/stop - stop and remove your session\n` +
     `/help - show this help\n\n` +
