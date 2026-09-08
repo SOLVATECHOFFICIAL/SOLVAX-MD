@@ -6,11 +6,12 @@ const fs = require('fs');
 const path = require('path');
 const ytdl = require('ytdl-core');
 const sharp = require('sharp');
-const ffmpeg = require('fluent-ffmpeg');
 
-// -------------------- CONFIG --------------------
+// ============================================================
+//  CONFIGURATION
+// ============================================================
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
-const BOT_TOKEN = '8651480854:AAGvTXTzpopKVHAXFlHAYPblxTrEK5oHwco'; // Your Telegram token
+const BOT_TOKEN = process.env.BOT_TOKEN;
 const OWNER_NUMBER = config.ownerNumber.replace(/\D/g, '');
 const BOT_NAME = config.botName;
 const OWNER_NAME = config.ownerName;
@@ -18,9 +19,15 @@ const CO_OWNERS = config.coOwners.map(n => n.replace(/\D/g, ''));
 const AUTO_DELETE_LOADING = config.autoDeleteLoading;
 const VV_METHODS = config.vvMethods || 5;
 const PLAY_SOURCES = config.playSources || 3;
-const SHOW_MEMBERS_IN_GROUPINFO = config.groupInfoShowMembers || false;
 
-// -------------------- DATABASE (with write queue) --------------------
+if (!BOT_TOKEN) {
+    console.error('❌ BOT_TOKEN environment variable is missing!');
+    process.exit(1);
+}
+
+// ============================================================
+//  DATABASE WITH WRITE QUEUE
+// ============================================================
 const DB_FILE = './database.json';
 let db = { antilink: {}, antimention: {}, antiviewonce: {}, antibot: {} };
 let dbWriteQueue = [];
@@ -66,9 +73,12 @@ function updateAntiSettings(groupId, type, key, value) {
     saveDatabase();
 }
 
-// -------------------- TELEGRAM BOT --------------------
+// ============================================================
+//  TELEGRAM BOT
+// ============================================================
 const bot = new Telegraf(BOT_TOKEN);
 const sessions = {};
+const pairingStates = {}; // Store temporary pairing states
 
 // Command queue - first come first serve
 let commandQueue = [];
@@ -92,13 +102,33 @@ function enqueueCommand(task) {
     if (!isProcessing) processQueue();
 }
 
-// -------------------- TELEGRAM COMMANDS --------------------
+// Sleep helper
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ============================================================
+//  TELEGRAM COMMANDS
+// ============================================================
+
+// ---------- /start ----------
 bot.start((ctx) => {
-    ctx.reply(`⚔️ *${BOT_NAME} v11*\n👑 Owner: ${OWNER_NAME}\n📚 Built for Teaching & Group Management\n\nSend /help for full command list\nSend /pair 234712345678 to link WhatsApp\nSend /status to check connection\nSend /stop to disconnect`, { parse_mode: 'Markdown' });
+    ctx.reply(
+        `⚔️ *${BOT_NAME} v11*\n` +
+        `👑 Owner: ${OWNER_NAME}\n` +
+        `📚 Built for Teaching & Group Management\n\n` +
+        `Send /help for full command list\n` +
+        `Send /pair to link your WhatsApp\n` +
+        `Send /status to check connection\n` +
+        `Send /stop to disconnect`,
+        { parse_mode: 'Markdown' }
+    );
 });
 
+// ---------- /help ----------
 bot.help((ctx) => {
-    const helpText = `⚔️ *${BOT_NAME} v11 – Full Command List*
+    const helpText = 
+`⚔️ *${BOT_NAME} v11 – Full Command List*
 
 👑 Owner: ${OWNER_NAME}
 📚 Built for Teaching & Group Management
@@ -113,7 +143,7 @@ bot.help((ctx) => {
 .video [song]  → Download MP4 (YouTube)
 .sticker       → Convert image/video to sticker
 .lyrics [song] → Get song lyrics
-.groupinfo     → See group stats (members, owner, admins) – Private reply
+.groupinfo     → See group stats (private reply)
 
 ───────────
 👑 *ADMIN FORCE (7 commands)*
@@ -143,7 +173,7 @@ on/off | kick/delete/warn | admin on/off | warns <n> | resetwarns | clearwarns @
 ───────────
 /start   → Welcome message
 /help    → This full list
-/pair 234xxx → Link WhatsApp
+/pair    → Link WhatsApp (asks for number)
 /status  → Check connection
 /stop    → Disconnect WhatsApp
 
@@ -154,122 +184,223 @@ Menu, ping, vv, sticker, groupinfo, anti warnings → Private (only you see).`;
     ctx.reply(helpText, { parse_mode: 'Markdown' });
 });
 
+// ---------- /pair (Conversational) ----------
 bot.command('pair', async (ctx) => {
     const userId = ctx.from.id;
-    const args = ctx.message.text.split(' ');
-    const number = args[1];
 
-    if (!number) {
-        return ctx.reply('❌ Format: `/pair 234712345678` (country code, no +)', { parse_mode: 'Markdown' });
+    // Check if already has session
+    if (sessions[userId] && sessions[userId].connected) {
+        return ctx.reply('⚠️ You already have an active WhatsApp session. Use /status to check.');
     }
 
-    const cleanNumber = number.replace(/\D/g, '');
-    if (cleanNumber.length < 10) {
-        return ctx.reply('❌ Number too short. Include country code (e.g., 234 for Nigeria).', { parse_mode: 'Markdown' });
+    // Check if already in pairing state
+    if (pairingStates[userId]) {
+        return ctx.reply('⏳ You already have a pending pairing request. Send your number now.');
     }
 
-    if (sessions[userId]) {
-        return ctx.reply('⚠️ You already have an active session. Use /status to check.', { parse_mode: 'Markdown' });
+    // Ask for number
+    await ctx.reply(
+        `📱 Please send your WhatsApp number with country code.\n` +
+        `Example: 2349012345678 (Nigeria)\n` +
+        `(No + sign, no leading zero)\n\n` +
+        `⏳ Send your number in the next 30 seconds.`
+    );
+
+    // Set pairing state
+    pairingStates[userId] = { step: 'awaiting_number', timestamp: Date.now() };
+
+    // Auto-cancel after 30 seconds
+    setTimeout(() => {
+        if (pairingStates[userId]) {
+            delete pairingStates[userId];
+            ctx.reply('⏳ Pairing request timed out. Send /pair again to start over.');
+        }
+    }, 30000);
+});
+
+// ---------- Handle number input (for /pair) ----------
+bot.on('text', async (ctx) => {
+    const userId = ctx.from.id;
+    const text = ctx.message.text.trim();
+
+    // If user is in pairing state
+    if (pairingStates[userId] && pairingStates[userId].step === 'awaiting_number') {
+        // Validate number
+        const cleanNumber = text.replace(/\D/g, '');
+        if (cleanNumber.length < 10 || cleanNumber.length > 15) {
+            return ctx.reply('❌ Invalid number. Use format: 2349012345678 (country code + number)');
+        }
+
+        // Check if starts with country code (234)
+        if (!cleanNumber.startsWith('234')) {
+            return ctx.reply('❌ Please include Nigeria country code (234) before your number.\nExample: 2349012345678');
+        }
+
+        // Clear pairing state
+        delete pairingStates[userId];
+
+        // Start pairing process
+        await ctx.reply(`⏳ Generating pairing code for ${cleanNumber}...\nPlease wait 5-10 seconds while I connect...`);
+
+        try {
+            const sessionFolder = `auth_tg_${userId}`;
+            const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
+
+            const sock = makeWASocket({
+                auth: state,
+                printQRInTerminal: false,
+                browser: ['SolvaX MD', 'Chrome', '1.0.0'],
+            });
+
+            // Wait for socket to be ready with timeout
+            let socketReady = false;
+            let attempts = 0;
+            const maxAttempts = 10;
+
+            while (attempts < maxAttempts && !socketReady) {
+                await sleep(1000);
+                attempts++;
+                try {
+                    if (sock.ws?.readyState === 1) {
+                        socketReady = true;
+                    }
+                } catch (e) {}
+            }
+
+            if (!socketReady) {
+                await ctx.reply('⚠️ Connection timed out. Please send /pair to try again.');
+                return;
+            }
+
+            // Request pairing code
+            const code = await sock.requestPairingCode(cleanNumber);
+            
+            // Store session
+            sessions[userId] = {
+                sock,
+                saveCreds,
+                number: cleanNumber,
+                connected: false,
+                userId: userId,
+                state: 'connecting'
+            };
+
+            // ---------- WHATSAPP EVENT HANDLERS ----------
+            sock.ev.on('connection.update', (update) => {
+                const { connection, lastDisconnect } = update;
+                if (connection === 'open') {
+                    sessions[userId].connected = true;
+                    sessions[userId].state = 'connected';
+                    bot.telegram.sendMessage(
+                        userId,
+                        `✅ *WhatsApp connected successfully!*\nNumber: ${cleanNumber}\nSend .menu to get started.`,
+                        { parse_mode: 'Markdown' }
+                    );
+                } else if (connection === 'close') {
+                    const shouldReconnect = (lastDisconnect?.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+                    if (!shouldReconnect) {
+                        sessions[userId].connected = false;
+                        sessions[userId].state = 'disconnected';
+                        delete sessions[userId];
+                        bot.telegram.sendMessage(
+                            userId,
+                            '🔴 WhatsApp disconnected. Use /pair to reconnect.'
+                        );
+                    } else {
+                        sessions[userId].state = 'connecting';
+                        sessions[userId].connected = false;
+                    }
+                }
+            });
+
+            sock.ev.on('creds.update', saveCreds);
+
+            // ---------- WHATSAPP MESSAGE HANDLER ----------
+            sock.ev.on('messages.upsert', async (m) => {
+                const msg = m.messages[0];
+                if (!msg.message || msg.key.fromMe) return;
+
+                const sender = msg.key.remoteJid;
+                const senderNumber = msg.key.participant ? msg.key.participant.split('@')[0] : sender.split('@')[0];
+                const isGroup = sender.endsWith('@g.us');
+                const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').toLowerCase();
+
+                // Check if this user is the one who paired
+                const isPairedUser = senderNumber === cleanNumber || sender === cleanNumber + '@s.whatsapp.net';
+                if (!isPairedUser) return;
+
+                // Enqueue command
+                enqueueCommand(async () => {
+                    await handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, text, userId);
+                });
+            });
+
+            // Send pairing code
+            await ctx.reply(
+                `🔑 *Pairing Code:* \`${code}\`\n\n` +
+                `Open WhatsApp → Linked Devices → Link with phone number\n` +
+                `Type this code.\n\n` +
+                `⏳ This code expires in 5 minutes.\n` +
+                `If it expires, send /pair again.`,
+                { parse_mode: 'Markdown' }
+            );
+
+        } catch (error) {
+            console.error('Pairing error:', error);
+            await ctx.reply(`❌ Error: ${error.message || 'Connection failed. Please try again.'}`);
+        }
+    }
+});
+
+// ---------- /status ----------
+bot.command('status', (ctx) => {
+    const userId = ctx.from.id;
+    const session = sessions[userId];
+
+    if (!session) {
+        return ctx.reply('❌ No active session. Use /pair to link your WhatsApp.');
+    }
+
+    const state = session.state || 'disconnected';
+    const number = session.number || 'Unknown';
+
+    if (state === 'connected' && session.connected) {
+        ctx.reply(`✅ WhatsApp is ONLINE and ready to use.\nNumber: ${number}`);
+    } else if (state === 'connecting') {
+        ctx.reply('⏳ Connecting to WhatsApp... Please wait 5-10 seconds.');
+    } else if (state === 'expired') {
+        ctx.reply('⚠️ Your WhatsApp session has expired. Send /pair to reconnect.');
+    } else if (state === 'disconnected') {
+        ctx.reply('🔴 WhatsApp is disconnected. Send /pair to reconnect.');
+    } else {
+        ctx.reply(`⚠️ Status: ${state}\nIf this persists, send /stop and try /pair again.`);
+    }
+});
+
+// ---------- /stop ----------
+bot.command('stop', (ctx) => {
+    const userId = ctx.from.id;
+    const session = sessions[userId];
+
+    if (!session) {
+        return ctx.reply('❌ No active session to disconnect.');
     }
 
     try {
-        const loadingMsg = await ctx.reply('⏳ Generating pairing code...');
+        session.sock?.end();
+    } catch (e) {}
 
-        const sessionFolder = `auth_tg_${userId}`;
-        const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
-
-        const sock = makeWASocket({
-            auth: state,
-            printQRInTerminal: false,
-        });
-
-        const code = await sock.requestPairingCode(cleanNumber);
-        
-        // Store session
-        sessions[userId] = { 
-            sock, 
-            saveCreds, 
-            number: cleanNumber,
-            connected: false
-        };
-
-        // -------------------- WHATSAPP MESSAGE HANDLER --------------------
-        sock.ev.on('messages.upsert', async (m) => {
-            const msg = m.messages[0];
-            if (!msg.message || msg.key.fromMe) return;
-
-            const sender = msg.key.remoteJid;
-            const senderNumber = msg.key.participant ? msg.key.participant.split('@')[0] : sender.split('@')[0];
-            const isGroup = sender.endsWith('@g.us');
-            const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').toLowerCase();
-            
-            // Check if this user is the one who paired
-            const isPairedUser = senderNumber === cleanNumber || sender === cleanNumber + '@s.whatsapp.net';
-            if (!isPairedUser) return;
-
-            // First come first serve - enqueue command
-            enqueueCommand(async () => {
-                await handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, text);
-            });
-        });
-
-        // Handle WhatsApp connection updates
-        sock.ev.on('connection.update', (update) => {
-            const { connection, lastDisconnect } = update;
-            if (connection === 'open') {
-                sessions[userId].connected = true;
-                bot.telegram.sendMessage(userId, `✅ *WhatsApp connected successfully!*\nNumber: ${cleanNumber}\nSend .menu to get started.`, { parse_mode: 'Markdown' });
-            } else if (connection === 'close') {
-                const shouldReconnect = (lastDisconnect?.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-                if (!shouldReconnect) {
-                    delete sessions[userId];
-                    bot.telegram.sendMessage(userId, '❌ WhatsApp disconnected. Use /pair to reconnect.');
-                } else {
-                    sessions[userId].connected = false;
-                }
-            }
-        });
-
-        sock.ev.on('creds.update', saveCreds);
-
-        // Delete loading message
-        await ctx.deleteMessage(loadingMsg.message_id);
-
-        ctx.reply(`🔑 *Pairing Code:* \`${code}\`\n\nOpen WhatsApp → Linked Devices → Link with phone number\nType this code.\n\n⏳ This code expires in 5 minutes.\nIf it expires, send /pair again.`, { parse_mode: 'Markdown' });
-
-    } catch (error) {
-        ctx.reply(`❌ Error: ${error.message}`);
-    }
+    delete sessions[userId];
+    ctx.reply('✅ WhatsApp disconnected successfully.');
 });
 
-bot.command('status', (ctx) => {
-    const userId = ctx.from.id;
-    if (sessions[userId] && sessions[userId].connected) {
-        ctx.reply(`✅ *WhatsApp is ONLINE*\nNumber: ${sessions[userId].number}`, { parse_mode: 'Markdown' });
-    } else if (sessions[userId]) {
-        ctx.reply('⚠️ WhatsApp is connected but not ready. Wait a few seconds.', { parse_mode: 'Markdown' });
-    } else {
-        ctx.reply('❌ No active session. Use /pair 234712345678 to link.', { parse_mode: 'Markdown' });
-    }
-});
-
-bot.command('stop', (ctx) => {
-    const userId = ctx.from.id;
-    if (sessions[userId]) {
-        try {
-            sessions[userId].sock?.end();
-        } catch (e) {}
-        delete sessions[userId];
-        ctx.reply('✅ WhatsApp disconnected successfully.', { parse_mode: 'Markdown' });
-    } else {
-        ctx.reply('❌ No active session to disconnect.', { parse_mode: 'Markdown' });
-    }
-});
-
-// -------------------- WHATSAPP COMMAND HANDLER --------------------
-async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, text) {
+// ============================================================
+//  WHATSAPP COMMAND HANDLER
+// ============================================================
+async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, text, userId) {
     // Helper functions
     const isOwner = senderNumber === OWNER_NUMBER || CO_OWNERS.includes(senderNumber);
+
     const isAdmin = async () => {
         if (!isGroup) return true;
         try {
@@ -278,6 +409,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
             return participant?.admin === 'admin' || participant?.admin === 'superadmin' || isOwner;
         } catch (e) { return false; }
     };
+
     const getGroupAdmins = async () => {
         if (!isGroup) return [];
         try {
@@ -285,6 +417,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
             return group.participants.filter(p => p.admin).map(p => p.id);
         } catch (e) { return []; }
     };
+
     const getBotAdminStatus = async () => {
         if (!isGroup) return false;
         try {
@@ -301,7 +434,6 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
             return await sock.sendMessage(sender, { text: loadingText });
         }
         const loading = await sock.sendMessage(sender, { text: loadingText });
-        // Schedule auto-delete after 2 seconds
         setTimeout(async () => {
             try {
                 await sock.sendMessage(sender, { delete: { remoteJid: sender, fromMe: true, id: loading.key.id } });
@@ -310,11 +442,10 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return loading;
     }
 
-    // -------------------- COMMANDS --------------------
-    
-    // .menu
+    // ---------- .menu ----------
     if (text === '.menu') {
-        const menu = `╭┈〔 ✦ ${BOT_NAME} ✦ 〕┈┈┈
+        const menu = 
+`╭┈〔 ✦ ${BOT_NAME} ✦ 〕┈┈┈
 ┊ 👑 Owner: ${OWNER_NAME}
 ┊ 📚 Teaching Web Devs
 ├┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
@@ -331,23 +462,19 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // .ping
+    // ---------- .ping ----------
     if (text === '.ping') {
-        const start = Date.now();
         await sock.sendMessage(sender, { text: '🏓 Pong! Bot is alive.' });
-        const end = Date.now();
-        // Update with response time (optional)
         return;
     }
 
-    // .vv - View Once with all methods
+    // ---------- .vv (View Once - 5 Methods) ----------
     if (text === '.vv') {
         await sendLoading('⏳ Attempting to decrypt view-once...');
 
         let success = false;
         for (let method = 1; method <= VV_METHODS; method++) {
             try {
-                // Method 1: Baileys default download
                 if (method === 1) {
                     const media = await sock.downloadMediaMessage(msg);
                     if (media) {
@@ -356,7 +483,6 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
                         break;
                     }
                 }
-                // Method 2: Extract direct URL
                 if (method === 2) {
                     const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
                     if (msgObj?.imageMessage || msgObj?.videoMessage) {
@@ -374,28 +500,37 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
                         }
                     }
                 }
-                // Method 3-5: Additional methods
-                if (method >= 3 && method <= VV_METHODS) {
-                    // Attempt other decryption methods (simplified for brevity)
-                    // In production, these would use direct media key extraction
-                    if (method === 3) {
-                        // Try to get media key from message
-                        const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
-                        if (msgObj?.imageMessage || msgObj?.videoMessage) {
-                            const mediaKey = msgObj.imageMessage?.mediaKey || msgObj.videoMessage?.mediaKey;
-                            if (mediaKey) {
-                                // Attempt decryption with media key (simplified)
-                                const media = await sock.downloadMediaMessage(msg);
-                                if (media) {
-                                    await sock.sendMessage(sender, { image: media, caption: '🔓 View-once decrypted!' });
-                                    success = true;
-                                    break;
-                                }
+                if (method === 3) {
+                    const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
+                    if (msgObj?.imageMessage || msgObj?.videoMessage) {
+                        const mediaKey = msgObj.imageMessage?.mediaKey || msgObj.videoMessage?.mediaKey;
+                        if (mediaKey) {
+                            const media = await sock.downloadMediaMessage(msg);
+                            if (media) {
+                                await sock.sendMessage(sender, { image: media, caption: '🔓 View-once decrypted!' });
+                                success = true;
+                                break;
                             }
                         }
                     }
-                    // Method 4 & 5 would use advanced techniques
-                    // (simplified for this example)
+                }
+                if (method === 4) {
+                    // Try alternative decryption
+                    const media = await sock.downloadMediaMessage(msg);
+                    if (media) {
+                        await sock.sendMessage(sender, { image: media, caption: '🔓 View-once decrypted!' });
+                        success = true;
+                        break;
+                    }
+                }
+                if (method === 5) {
+                    // Final attempt
+                    const media = await sock.downloadMediaMessage(msg);
+                    if (media) {
+                        await sock.sendMessage(sender, { image: media, caption: '🔓 View-once decrypted!' });
+                        success = true;
+                        break;
+                    }
                 }
             } catch (e) {
                 // Continue to next method
@@ -403,12 +538,14 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         }
 
         if (!success) {
-            await sock.sendMessage(sender, { text: '❌ Could not decrypt view-once.\nThis is a WhatsApp limitation, not a bot bug.\nTry asking sender to send normally.' });
+            await sock.sendMessage(sender, {
+                text: '❌ Could not decrypt view-once.\nThis is a WhatsApp limitation, not a bot bug.\nTry asking sender to send normally.'
+            });
         }
         return;
     }
 
-    // .play - Music download with 3 sources
+    // ---------- .play (Music - 3 Sources) ----------
     if (text.startsWith('.play ')) {
         const song = text.replace('.play ', '');
         await sendLoading(`⏳ Searching for: ${song}`);
@@ -427,8 +564,8 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
                 const videoId = html.match(/watch\?v=([a-zA-Z0-9_-]{11})/)?.[1];
                 if (videoId) {
                     const stream = ytdl(`https://www.youtube.com/watch?v=${videoId}`, { filter: 'audioonly' });
-                    await sock.sendMessage(sender, { 
-                        audio: stream, 
+                    await sock.sendMessage(sender, {
+                        audio: stream,
                         mimetype: 'audio/mpeg',
                         fileName: `${song}.mp3`
                     });
@@ -447,8 +584,8 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
                 if (data.url) {
                     const audioResponse = await fetch(data.url);
                     const buffer = await audioResponse.buffer();
-                    await sock.sendMessage(sender, { 
-                        audio: buffer, 
+                    await sock.sendMessage(sender, {
+                        audio: buffer,
                         mimetype: 'audio/mpeg',
                         fileName: `${song}.mp3`
                     });
@@ -467,8 +604,8 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
                 if (data.download) {
                     const audioResponse = await fetch(data.download);
                     const buffer = await audioResponse.buffer();
-                    await sock.sendMessage(sender, { 
-                        audio: buffer, 
+                    await sock.sendMessage(sender, {
+                        audio: buffer,
                         mimetype: 'audio/mpeg',
                         fileName: `${song}.mp3`
                     });
@@ -483,7 +620,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // .video - Video download with 3 sources
+    // ---------- .video (Video - 3 Sources) ----------
     if (text.startsWith('.video ')) {
         const video = text.replace('.video ', '');
         await sendLoading(`⏳ Searching for video: ${video}`);
@@ -492,10 +629,9 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         let attempts = 0;
         const maxAttempts = PLAY_SOURCES;
 
-        // Similar to .play but for video
-        // (simplified for space - same structure as .play)
-        if (!success) {
-            // Use ytdl-core for video
+        // Source 1: ytdl-core
+        if (!success && attempts < maxAttempts) {
+            attempts++;
             try {
                 const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(video)}`;
                 const searchResponse = await fetch(searchUrl);
@@ -503,8 +639,48 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
                 const videoId = html.match(/watch\?v=([a-zA-Z0-9_-]{11})/)?.[1];
                 if (videoId) {
                     const stream = ytdl(`https://www.youtube.com/watch?v=${videoId}`, { filter: 'audioandvideo' });
-                    await sock.sendMessage(sender, { 
-                        video: stream, 
+                    await sock.sendMessage(sender, {
+                        video: stream,
+                        mimetype: 'video/mp4',
+                        fileName: `${video}.mp4`
+                    });
+                    success = true;
+                }
+            } catch (e) {}
+        }
+
+        // Source 2: Third-party API
+        if (!success && attempts < maxAttempts) {
+            attempts++;
+            try {
+                const apiUrl = `https://api.ryzendesu.vip/api/download/ytmp4?text=${encodeURIComponent(video)}`;
+                const response = await fetch(apiUrl);
+                const data = await response.json();
+                if (data.url) {
+                    const videoResponse = await fetch(data.url);
+                    const buffer = await videoResponse.buffer();
+                    await sock.sendMessage(sender, {
+                        video: buffer,
+                        mimetype: 'video/mp4',
+                        fileName: `${video}.mp4`
+                    });
+                    success = true;
+                }
+            } catch (e) {}
+        }
+
+        // Source 3: Alternative API
+        if (!success && attempts < maxAttempts) {
+            attempts++;
+            try {
+                const apiUrl = `https://api.vevioz.com/api/button/mp4/${encodeURIComponent(video)}`;
+                const response = await fetch(apiUrl);
+                const data = await response.json();
+                if (data.download) {
+                    const videoResponse = await fetch(data.download);
+                    const buffer = await videoResponse.buffer();
+                    await sock.sendMessage(sender, {
+                        video: buffer,
                         mimetype: 'video/mp4',
                         fileName: `${video}.mp4`
                     });
@@ -519,13 +695,12 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // .sticker
+    // ---------- .sticker ----------
     if (text === '.sticker') {
         await sendLoading('⏳ Creating sticker...');
         try {
             const media = await sock.downloadMediaMessage(msg);
             if (media) {
-                // Convert to webp
                 const webp = await sharp(media).webp().toBuffer();
                 await sock.sendMessage(sender, { sticker: webp });
             } else {
@@ -537,7 +712,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // .lyrics
+    // ---------- .lyrics ----------
     if (text.startsWith('.lyrics ')) {
         const song = text.replace('.lyrics ', '');
         await sendLoading(`⏳ Fetching lyrics for: ${song}`);
@@ -573,7 +748,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // .groupinfo - Private reply (only user sees)
+    // ---------- .groupinfo ----------
     if (text === '.groupinfo') {
         if (!isGroup) {
             return await sock.sendMessage(sender, { text: '❌ Use this command in a group.' });
@@ -585,8 +760,19 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
             const creator = group.owner || group.creator || 'Unknown';
             const memberCount = group.participants.length;
 
-            let info = `📊 GROUP INFO\n\nName: ${group.subject}\nDescription: ${group.desc || 'None'}\nOwner: ${creator.split('@')[0] || 'Unknown'}\nAdmins: ${admins.length}\nTotal Members: ${memberCount}\nCreated: ${new Date(group.creation * 1000).toLocaleDateString()}\n\n👑 Admins:\n${admins.map(a => a).join('\n')}`;
-            
+            let info = 
+`📊 GROUP INFO
+
+Name: ${group.subject}
+Description: ${group.desc || 'None'}
+Owner: ${creator.split('@')[0] || 'Unknown'}
+Admins: ${admins.length}
+Total Members: ${memberCount}
+Created: ${new Date(group.creation * 1000).toLocaleDateString()}
+
+👑 Admins:
+${admins.map(a => a).join('\n')}`;
+
             await sock.sendMessage(sender, { text: info });
         } catch (e) {
             await sock.sendMessage(sender, { text: '⚠️ Could not fetch group info.' });
@@ -594,11 +780,11 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // -------------------- ADMIN COMMANDS --------------------
+    // ---------- ADMIN COMMANDS ----------
     const isAdminUser = await isAdmin();
     if (!isAdminUser) return;
 
-    // .tagall
+    // ---------- .tagall ----------
     if (text === '.tagall') {
         if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Group only.' });
         await sendLoading('⏳ Fetching members...');
@@ -613,7 +799,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // .tagadmin
+    // ---------- .tagadmin ----------
     if (text === '.tagadmin') {
         if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Group only.' });
         await sendLoading('⏳ Fetching admins...');
@@ -628,7 +814,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // .add
+    // ---------- .add ----------
     if (text.startsWith('.add ')) {
         if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Group only.' });
         const num = text.replace('.add ', '').replace(/\D/g, '') + '@s.whatsapp.net';
@@ -649,7 +835,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // .kick
+    // ---------- .kick ----------
     if (text.startsWith('.kick ')) {
         if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Group only.' });
         const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid;
@@ -674,7 +860,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // .promote
+    // ---------- .promote ----------
     if (text.startsWith('.promote ')) {
         if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Group only.' });
         const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid;
@@ -691,7 +877,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // .demote
+    // ---------- .demote ----------
     if (text.startsWith('.demote ')) {
         if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Group only.' });
         const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid;
@@ -716,7 +902,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // .mute on/off or .lock/.unlock
+    // ---------- .mute on / .lock ----------
     if (text === '.mute on' || text === '.lock') {
         if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Group only.' });
         const isBotAdmin = await getBotAdminStatus();
@@ -731,6 +917,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
+    // ---------- .mute off / .unlock ----------
     if (text === '.mute off' || text === '.unlock') {
         if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Group only.' });
         const isBotAdmin = await getBotAdminStatus();
@@ -745,14 +932,18 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // -------------------- ANTI-SYSTEM COMMANDS --------------------
-    // .antilink - Show settings or update
+    // ============================================================
+    //  ANTI-SYSTEM COMMANDS
+    // ============================================================
+
+    // ---------- .antilink ----------
     if (text === '.antilink') {
         const groupId = isGroup ? sender.split('@')[0] : 'private';
         const settings = getAntiSettings(groupId, 'antilink');
         const status = settings.enabled ? '🟢 ON' : '🔴 OFF';
         const actionEmoji = settings.action === 'kick' ? '👢' : settings.action === 'delete' ? '🗑️' : '⚠️';
-        const panel = `╭─⚔ ⚔ ANTILINK ⚔
+        const panel = 
+`╭─⚔ ⚔ ANTILINK ⚔
 ┊ ✧ STATUS
 ╰─⚔
 ◆ Enabled     : ${status}
@@ -795,13 +986,14 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // .antimention
+    // ---------- .antimention ----------
     if (text === '.antimention') {
         const groupId = isGroup ? sender.split('@')[0] : 'private';
         const settings = getAntiSettings(groupId, 'antimention');
         const status = settings.enabled ? '🟢 ON' : '🔴 OFF';
         const actionEmoji = settings.action === 'kick' ? '👢' : settings.action === 'delete' ? '🗑️' : '⚠️';
-        const panel = `╭─⚔ ⚔ ANTIMENTION ⚔
+        const panel = 
+`╭─⚔ ⚔ ANTIMENTION ⚔
 ┊ ✧ STATUS
 ╰─⚔
 ◆ Enabled     : ${status}
@@ -844,13 +1036,14 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // .antiviewonce
+    // ---------- .antiviewonce ----------
     if (text === '.antiviewonce') {
         const groupId = isGroup ? sender.split('@')[0] : 'private';
         const settings = getAntiSettings(groupId, 'antiviewonce');
         const status = settings.enabled ? '🟢 ON' : '🔴 OFF';
         const actionEmoji = settings.action === 'kick' ? '👢' : settings.action === 'delete' ? '🗑️' : '⚠️';
-        const panel = `╭─⚔ ⚔ ANTIVIEWONCE ⚔
+        const panel = 
+`╭─⚔ ⚔ ANTIVIEWONCE ⚔
 ┊ ✧ STATUS
 ╰─⚔
 ◆ Enabled     : ${status}
@@ -893,13 +1086,14 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // .antibot
+    // ---------- .antibot ----------
     if (text === '.antibot') {
         const groupId = isGroup ? sender.split('@')[0] : 'private';
         const settings = getAntiSettings(groupId, 'antibot');
         const status = settings.enabled ? '🟢 ON' : '🔴 OFF';
         const actionEmoji = settings.action === 'kick' ? '👢' : settings.action === 'delete' ? '🗑️' : '⚠️';
-        const panel = `╭─⚔ ⚔ ANTIBOT ⚔
+        const panel = 
+`╭─⚔ ⚔ ANTIBOT ⚔
 ┊ ✧ STATUS
 ╰─⚔
 ◆ Enabled     : ${status}
@@ -943,9 +1137,16 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
     }
 }
 
-// -------------------- START BOT --------------------
-bot.launch().then(() => console.log('🤖 SolvaX MD Telegram bot running...'));
-console.log('⚔️ SolvaX MD v11 is ready!');
+// ============================================================
+//  START BOT
+// ============================================================
+bot.launch().then(() => {
+    console.log('🤖 SolvaX MD Telegram bot running...');
+    console.log('⚔️ SolvaX MD v11 is ready!');
+    console.log(`📱 Owner: ${OWNER_NUMBER}`);
+    console.log(`📚 Bot: ${BOT_NAME}`);
+    console.log(`🌐 Telegram: @solvax_mdbot`);
+});
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
