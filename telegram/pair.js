@@ -1,563 +1,688 @@
-const { cleanNumber, sleep } = require('../lib/helpers');
+'use strict';
+
+const {
+    cleanNumber
+} = require('../lib/helpers');
+
 const {
     createWhatsAppSession,
-    getWhatsAppSession
+    getWhatsAppSession,
+    prepareFreshPairing
 } = require('../lib/whatsapp');
 
-const PAIR_TIMEOUT = 90 * 1000;
+/*
+|--------------------------------------------------------------------------
+| SOLVAX MD - PAIR COMMAND
+|--------------------------------------------------------------------------
+|
+| IMPORTANT:
+| This file DOES NOT register bot.on('text') dynamically.
+|
+| /pair only creates a pairing state and asks the user for a number.
+| The GLOBAL Telegram text handler in index.js is responsible for
+| receiving the number and calling handlePairNumber().
+|
+| This prevents:
+|
+|   /pair
+|   -> waiting_number
+|   -> number ignored
+|   -> pairing state stuck forever
+|
+|--------------------------------------------------------------------------
+*/
+
+const WAITING_TIMEOUT = 2 * 60 * 1000;
+
+function getStates() {
+    if (!global.pairingStates) {
+        global.pairingStates = {};
+    }
+
+    return global.pairingStates;
+}
+
+function getSessions() {
+    if (!global.sessions) {
+        global.sessions = {};
+    }
+
+    return global.sessions;
+}
+
+function getUserId(ctx) {
+    return String(ctx?.from?.id || '');
+}
 
 function getPairingState(userId) {
-    global.pairingStates = global.pairingStates || {};
-    return global.pairingStates[userId];
+    return getStates()[userId] || null;
 }
 
 function setPairingState(userId, state) {
-    global.pairingStates = global.pairingStates || {};
-    global.pairingStates[userId] = state;
+    getStates()[userId] = {
+        ...state,
+        userId,
+        updatedAt: Date.now()
+    };
+
+    return getStates()[userId];
 }
 
 function clearPairingState(userId) {
-    if (global.pairingStates) {
-        delete global.pairingStates[userId];
+    const states = getStates();
+    const state = states[userId];
+
+    if (state?.timeout) {
+        clearTimeout(state.timeout);
+    }
+
+    delete states[userId];
+
+    return state || null;
+}
+
+function refreshPairingTimeout(userId) {
+    const states = getStates();
+    const state = states[userId];
+
+    if (!state) {
+        return;
+    }
+
+    if (state.timeout) {
+        clearTimeout(state.timeout);
+    }
+
+    state.timeout = setTimeout(async () => {
+        const current = states[userId];
+
+        if (!current) {
+            return;
+        }
+
+        /*
+         * Do not cancel an operation that has already progressed into
+         * actual WhatsApp connection creation.
+         */
+        if (
+            current.stage !== 'waiting_number' &&
+            current.stage !== 'waiting_code'
+        ) {
+            return;
+        }
+
+        clearPairingState(userId);
+
+        const bot = global.bot;
+
+        if (!bot) {
+            return;
+        }
+
+        try {
+            await bot.telegram.sendMessage(
+                userId,
+                '⌛ Pairing request expired.\n\n' +
+                'No phone number was received in time.\n\n' +
+                'Use /pair to start again.'
+            );
+        } catch (error) {
+            console.error(
+                '[PAIR TIMEOUT]',
+                error?.stack || error
+            );
+        }
+    }, WAITING_TIMEOUT);
+
+    /*
+     * A Node.js timer should not keep the entire application alive.
+     */
+    if (typeof state.timeout.unref === 'function') {
+        state.timeout.unref();
     }
 }
 
 function normalizePhoneNumber(input) {
     let number = cleanNumber(input);
 
-    // Nigerian local format:
-    // 08132538119 -> 2348132538119
-    if (number.startsWith('0')) {
-        number = '234' + number.slice(1);
+    /*
+     * WhatsApp pairing requires a real international number.
+     *
+     * Nigerian convenience:
+     *
+     * 08132538119
+     * becomes
+     * 2348132538119
+     *
+     * International numbers beginning with 00:
+     *
+     * 002348132538119
+     * becomes
+     * 2348132538119
+     */
+    if (number.startsWith('00')) {
+        number = number.slice(2);
+    }
+
+    /*
+     * Nigerian local format.
+     */
+    if (
+        number.length === 11 &&
+        number.startsWith('0')
+    ) {
+        number = `234${number.slice(1)}`;
+    }
+
+    /*
+     * WhatsApp phone numbers are generally between 7 and 15 digits.
+     * This is intentionally only a sanity check.
+     *
+     * We do NOT attempt to prove that the number actually belongs
+     * to WhatsApp. Baileys/WhatsApp handles that part.
+     */
+    if (
+        !number ||
+        number.length < 7 ||
+        number.length > 15
+    ) {
+        return null;
     }
 
     return number;
 }
 
-function isValidPhoneNumber(number) {
-    /*
-     * WhatsApp pairing requires the international number.
-     *
-     * We mainly expect:
-     * 234xxxxxxxxxx
-     *
-     * But we don't hard-code a single country so the bot
-     * can still be used with other international numbers.
-     */
-    return /^\d{8,15}$/.test(number);
-}
+function isPairingActive(userId) {
+    const state = getPairingState(userId);
 
-function maskNumber(number) {
-    const value = String(number || '');
-
-    if (value.length <= 7) {
-        return value;
+    if (!state) {
+        return false;
     }
-
-    return (
-        value.slice(0, 3) +
-        '****' +
-        value.slice(-4)
-    );
-}
-
-async function safeEdit(ctx, messageId, text) {
-    try {
-        await ctx.telegram.editMessageText(
-            ctx.chat.id,
-            messageId,
-            undefined,
-            text
-        );
-    } catch {
-        // The message may already have been edited/deleted.
-    }
-}
-
-async function safeDelete(ctx, messageId) {
-    try {
-        await ctx.telegram.deleteMessage(
-            ctx.chat.id,
-            messageId
-        );
-    } catch {
-        // Ignore Telegram deletion errors.
-    }
-}
-
-async function stopExistingSession(userId) {
-    const sessions = global.sessions || {};
-    const existing = sessions[userId];
-
-    if (!existing) {
-        return;
-    }
-
-    try {
-        /*
-         * Do not call the Telegram /stop handler here.
-         * Pairing needs its own cleanup and should not create
-         * another Telegram conversation flow.
-         */
-        if (existing.sock) {
-            try {
-                existing.intentionalStop = true;
-
-                if (typeof existing.sock.end === 'function') {
-                    existing.sock.end(
-                        new Error('Replaced by a new pairing attempt')
-                    );
-                }
-            } catch {
-                // Socket may already be closed.
-            }
-        }
-    } catch {
-        // Nothing else to do.
-    }
-
-    delete sessions[userId];
 
     /*
-     * Give Baileys a tiny amount of time to finish its
-     * asynchronous close handlers before another socket
-     * is created.
+     * Clean obviously stale states.
      */
-    await sleep(500);
-}
-
-async function waitForPairingCode(userId, number) {
-    const started = Date.now();
-
-    while (Date.now() - started < PAIR_TIMEOUT) {
-        const session = getWhatsAppSession(userId);
-
-        if (!session) {
-            throw new Error('WhatsApp session disappeared.');
-        }
-
-        if (session.pairingCode) {
-            return session.pairingCode;
-        }
-
-        if (session.pairingError) {
-            throw session.pairingError;
-        }
-
-        if (session.connection === 'open') {
-            /*
-             * This can happen when the account was already
-             * authenticated and no pairing code is necessary.
-             */
-            return null;
-        }
-
-        if (
-            session.connection === 'close' &&
-            !session.pairingCode
-        ) {
-            throw new Error(
-                session.lastDisconnectReason ||
-                'Connection closed before pairing code was generated.'
-            );
-        }
-
-        await sleep(500);
+    if (
+        state.updatedAt &&
+        Date.now() - state.updatedAt > WAITING_TIMEOUT &&
+        (
+            state.stage === 'waiting_number' ||
+            state.stage === 'waiting_code'
+        )
+    ) {
+        clearPairingState(userId);
+        return false;
     }
 
-    throw new Error(
-        'Timed out while waiting for WhatsApp pairing code.'
-    );
+    return Boolean(state.active);
+}
+
+async function reply(ctx, text) {
+    try {
+        return await ctx.reply(text);
+    } catch (error) {
+        console.error(
+            '[PAIR TELEGRAM REPLY]',
+            error?.stack || error
+        );
+    }
 }
 
 async function pairCommand(ctx) {
-    const userId = ctx.from.id;
+    const userId = getUserId(ctx);
 
-    global.sessions = global.sessions || {};
-    global.pairingStates = global.pairingStates || {};
+    if (!userId) {
+        return;
+    }
+
+    const states = getStates();
+    const sessions = getSessions();
 
     /*
-     * Never allow two /pair operations from the same
-     * Telegram account at the same time.
+     * Never allow two pairing jobs for one Telegram user.
      */
-    const existingPairing = getPairingState(userId);
+    if (isPairingActive(userId)) {
+        const state = states[userId];
 
-    if (existingPairing?.active) {
-        await ctx.reply(
-            '⏳ A WhatsApp pairing is already in progress.\n\n' +
-            'Please wait for it to finish before starting another one.'
-        );
-        return;
+        let message =
+            '⏳ A pairing operation is already running.\n\n';
+
+        if (state?.stage === 'waiting_number') {
+            message +=
+                'Send the WhatsApp phone number here.\n\n' +
+                'Example:\n' +
+                '2348132538119';
+        } else if (state?.stage === 'creating_session') {
+            message +=
+                'The WhatsApp session is being prepared.';
+        } else if (state?.stage === 'requesting_code') {
+            message +=
+                'The WhatsApp pairing code is being requested.';
+        } else if (state?.stage === 'waiting_connection') {
+            message +=
+                'The pairing code was sent.\n\n' +
+                'Finish linking the device in WhatsApp.';
+        } else {
+            message +=
+                'Wait for it to finish before using /pair again.';
+        }
+
+        return reply(ctx, message);
     }
 
-    const existingSession = getWhatsAppSession(userId);
-
-    if (existingSession?.connection === 'open') {
-        await ctx.reply(
-            '🟢 Your WhatsApp account is already connected.\n\n' +
-            `📱 Number: ${maskNumber(existingSession.number)}\n\n` +
-            'Use /stop first if you want to disconnect it and pair another number.'
+    /*
+     * If a session already exists, don't accidentally overwrite it.
+     */
+    if (sessions[userId]) {
+        return reply(
+            ctx,
+            '🟢 Your WhatsApp session is already active.\n\n' +
+            'Use /status to check it.\n' +
+            'Use /stop if you want to stop it before pairing another account.'
         );
-        return;
     }
 
-    const prompt = await ctx.reply(
+    /*
+     * Start a clean waiting state.
+     */
+    const state = setPairingState(userId, {
+        active: true,
+        stage: 'waiting_number',
+        phoneNumber: null,
+        pairingCode: null,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+        timeout: null
+    });
+
+    refreshPairingTimeout(userId);
+
+    state.timeout = getStates()[userId].timeout;
+
+    return reply(
+        ctx,
         '📱 Send the WhatsApp phone number you want to pair.\n\n' +
         'Use international format without +.\n\n' +
         'Example:\n' +
-        '`2348132538119`\n\n' +
-        'For a Nigerian number like `08132538119`, you can also send the local format.',
-        {
-            parse_mode: 'Markdown'
-        }
+        '2348132538119\n\n' +
+        'For a Nigerian number like 08132538119, you can also send the local format.\n\n' +
+        'Send only the number.'
     );
-
-    setPairingState(userId, {
-        active: true,
-        stage: 'waiting_number',
-        promptMessageId: prompt.message_id,
-        startedAt: Date.now()
-    });
-
-    /*
-     * Remove the old "waiting for number" handler after one
-     * successful number is received.
-     *
-     * Telegraf does not give each command its own state machine,
-     * so we use a temporary text handler and remove it when done.
-     */
-    const handler = async (messageCtx) => {
-        if (!messageCtx.message?.text) {
-            return;
-        }
-
-        /*
-         * Only accept the next text message from the same
-         * Telegram user and chat.
-         */
-        if (messageCtx.from?.id !== userId) {
-            return;
-        }
-
-        if (messageCtx.chat?.id !== ctx.chat?.id) {
-            return;
-        }
-
-        const state = getPairingState(userId);
-
-        if (!state?.active || state.stage !== 'waiting_number') {
-            return;
-        }
-
-        const input = messageCtx.message.text.trim();
-
-        /*
-         * Don't treat another bot command as a phone number.
-         */
-        if (input.startsWith('/')) {
-            await messageCtx.reply(
-                '❌ Pairing cancelled.\n\n' +
-                'Send /pair again when you are ready.'
-            );
-
-            clearPairingState(userId);
-
-            try {
-                bot.off('text', handler);
-            } catch {}
-
-            return;
-        }
-
-        const number = normalizePhoneNumber(input);
-
-        if (!isValidPhoneNumber(number)) {
-            await messageCtx.reply(
-                '❌ Invalid phone number.\n\n' +
-                'Send the WhatsApp number in international format without `+`.\n\n' +
-                'Example:\n' +
-                '`2348132538119`'
-            );
-
-            return;
-        }
-
-        /*
-         * Mark the state as processing immediately.
-         * This prevents another message from starting a
-         * second socket while the first one is being created.
-         */
-        setPairingState(userId, {
-            ...state,
-            active: true,
-            stage: 'creating_session',
-            number
-        });
-
-        try {
-            /*
-             * Delete the original prompt to keep Telegram clean.
-             */
-            await safeDelete(ctx, state.promptMessageId);
-
-            const preparingMessage = await messageCtx.reply(
-                '⏳ Preparing WhatsApp pairing...\n\n' +
-                `📱 Number: ${maskNumber(number)}\n\n` +
-                'Please wait while the pairing session is created.'
-            );
-
-            /*
-             * If a stale session exists, close it before creating
-             * the new one.
-             */
-            await stopExistingSession(userId);
-
-            /*
-             * Clear any stale pairing state that could have been
-             * left by a previous failed attempt, then immediately
-             * recreate the current state.
-             */
-            setPairingState(userId, {
-                active: true,
-                stage: 'requesting_code',
-                number,
-                startedAt: Date.now(),
-                messageId: preparingMessage.message_id
-            });
-
-            /*
-             * IMPORTANT:
-             *
-             * "number" is the WhatsApp account being linked.
-             * It is NOT the chat JID where commands should later
-             * be sent.
-             *
-             * lib/whatsapp.js will use the actual incoming
-             * message's remoteJid when processing commands.
-             */
-            let session;
-
-            try {
-                session = await createWhatsAppSession(
-                    userId,
-                    number,
-                    messageCtx,
-                    {
-                        pairing: true
-                    }
-                );
-            } catch (error) {
-                throw error;
-            }
-
-            if (!session) {
-                throw new Error(
-                    'WhatsApp session could not be created.'
-                );
-            }
-
-            /*
-             * Wait for lib/whatsapp.js to expose the pairing code.
-             */
-            const pairingCode = await waitForPairingCode(
-                userId,
-                number
-            );
-
-            /*
-             * If the session became authenticated without
-             * needing a code, tell the user it connected.
-             */
-            if (!pairingCode) {
-                const current = getWhatsAppSession(userId);
-
-                if (current?.connection === 'open') {
-                    clearPairingState(userId);
-
-                    await safeEdit(
-                        messageCtx,
-                        preparingMessage.message_id,
-                        '✅ WhatsApp connected successfully.\n\n' +
-                        `📱 Number: ${maskNumber(number)}\n\n` +
-                        'Your WhatsApp self-bot is now active.'
-                    );
-
-                    return;
-                }
-
-                throw new Error(
-                    'WhatsApp connected without returning a pairing code.'
-                );
-            }
-
-            /*
-             * Format the code visibly. Do not modify the actual
-             * code, because WhatsApp expects the exact characters.
-             */
-            const formattedCode = String(pairingCode)
-                .replace(/\s+/g, '')
-                .toUpperCase();
-
-            await safeEdit(
-                messageCtx,
-                preparingMessage.message_id,
-                '🔐 WhatsApp pairing code ready.\n\n' +
-                `📱 Number: ${maskNumber(number)}\n\n` +
-                `🔑 Code: \`${formattedCode}\`\n\n` +
-                'Open WhatsApp on the phone you are linking and enter this code from the Linked Devices pairing option.\n\n' +
-                '⏳ The code expires. Complete the linking now.'
-            );
-
-            setPairingState(userId, {
-                active: true,
-                stage: 'waiting_for_link',
-                number,
-                code: formattedCode,
-                startedAt: Date.now(),
-                messageId: preparingMessage.message_id
-            });
-
-            /*
-             * Give the WhatsApp connection handler time to report
-             * the result. We do not blindly declare success just
-             * because a code was generated.
-             */
-            const verificationStarted = Date.now();
-            let connected = false;
-
-            while (
-                Date.now() - verificationStarted <
-                PAIR_TIMEOUT
-            ) {
-                const current = getWhatsAppSession(userId);
-
-                if (!current) {
-                    break;
-                }
-
-                if (current.connection === 'open') {
-                    connected = true;
-                    break;
-                }
-
-                if (current.pairingError) {
-                    throw current.pairingError;
-                }
-
-                if (
-                    current.connection === 'close' &&
-                    current.intentionalStop !== true
-                ) {
-                    throw new Error(
-                        current.lastDisconnectReason ||
-                        'Connection closed while waiting for WhatsApp to link.'
-                    );
-                }
-
-                await sleep(1000);
-            }
-
-            if (connected) {
-                clearPairingState(userId);
-
-                await safeEdit(
-                    messageCtx,
-                    preparingMessage.message_id,
-                    '✅ WhatsApp connected successfully.\n\n' +
-                    `📱 Number: ${maskNumber(number)}\n\n` +
-                    '🤖 Your WhatsApp self-bot is now active.\n\n' +
-                    'Only messages sent by the linked WhatsApp account itself will trigger bot commands.'
-                );
-
-                return;
-            }
-
-            /*
-             * Pairing code was generated but the user did not
-             * finish linking within the allowed time.
-             */
-            throw new Error(
-                'Pairing timed out. The WhatsApp account was not connected.'
-            );
-        } catch (error) {
-            console.error(
-                '[PAIR ERROR]',
-                error?.stack || error
-            );
-
-            const reason =
-                error?.message ||
-                'Connection Closed';
-
-            /*
-             * Clean up the failed socket so the NEXT /pair can
-             * create a completely fresh connection.
-             */
-            const failedSession = getWhatsAppSession(userId);
-
-            if (failedSession) {
-                try {
-                    failedSession.intentionalStop = true;
-
-                    if (
-                        failedSession.sock &&
-                        typeof failedSession.sock.end === 'function'
-                    ) {
-                        failedSession.sock.end(
-                            new Error(
-                                'Pairing attempt failed; cleaning session.'
-                            )
-                        );
-                    }
-                } catch {}
-            }
-
-            if (global.sessions) {
-                delete global.sessions[userId];
-            }
-
-            clearPairingState(userId);
-
-            await messageCtx.reply(
-                '❌ Pairing failed.\n\n' +
-                `${reason}\n\n` +
-                'Check that the number belongs to the WhatsApp account you are linking, then use /pair to try again.'
-            );
-        } finally {
-            /*
-             * Remove the temporary handler.
-             *
-             * If "bot" is unavailable in this scope, the main
-             * index.js handler can still manage the conversation.
-             */
-            try {
-                bot.off('text', handler);
-            } catch {}
-        }
-    };
-
-    /*
-     * The project normally exposes the Telegraf bot as global.bot.
-     * Supporting both makes this file less dependent on one exact
-     * index.js implementation.
-     */
-    const bot =
-        global.bot ||
-        ctx.telegram?.bot ||
-        null;
-
-    if (!bot) {
-        clearPairingState(userId);
-
-        await ctx.reply(
-            '❌ Pairing system error.\n\n' +
-            'Telegram bot instance is unavailable.'
-        );
-
-        return;
-    }
-
-    bot.on('text', handler);
 }
 
+/*
+|--------------------------------------------------------------------------
+| HANDLE PHONE NUMBER
+|--------------------------------------------------------------------------
+|
+| Called by the GLOBAL Telegram text handler in index.js.
+|
+| Example:
+|
+| Telegram:
+|   /pair
+|
+| Bot:
+|   Send phone number...
+|
+| User:
+|   2349063285877
+|
+| index.js:
+|   handlePairNumber(ctx, '2349063285877')
+|
+|--------------------------------------------------------------------------
+*/
+
+async function handlePairNumber(ctx, rawNumber) {
+    const userId = getUserId(ctx);
+
+    if (!userId) {
+        return false;
+    }
+
+    const states = getStates();
+
+    const state = states[userId];
+
+    /*
+     * This text is not a pairing response for this user.
+     * Tell index.js to continue normal processing.
+     */
+    if (
+        !state ||
+        !state.active ||
+        state.stage !== 'waiting_number'
+    ) {
+        return false;
+    }
+
+    /*
+     * Refresh timeout because the user actually responded.
+     */
+    if (state.timeout) {
+        clearTimeout(state.timeout);
+        state.timeout = null;
+    }
+
+    const number = normalizePhoneNumber(rawNumber);
+
+    if (!number) {
+        refreshPairingTimeout(userId);
+
+        return reply(
+            ctx,
+            '❌ Invalid phone number.\n\n' +
+            'Send a valid WhatsApp number using international format.\n\n' +
+            'Example:\n' +
+            '2349063285877\n\n' +
+            'Do not include +.'
+        );
+    }
+
+    /*
+     * Prevent another session from appearing between /pair and the
+     * number message.
+     */
+    const existingSession = getWhatsAppSession(userId);
+
+    if (existingSession) {
+        clearPairingState(userId);
+
+        return reply(
+            ctx,
+            '🟢 A WhatsApp session is already active for this Telegram account.\n\n' +
+            'Use /status to inspect it or /stop before starting another pairing.'
+        );
+    }
+
+    /*
+     * Move state BEFORE starting asynchronous work.
+     *
+     * This is important.
+     *
+     * If the socket creation takes several seconds, another /pair
+     * command must not start a second operation.
+     */
+    setPairingState(userId, {
+        ...state,
+        active: true,
+        stage: 'creating_session',
+        phoneNumber: number,
+        pairingCode: null,
+        updatedAt: Date.now(),
+        timeout: null
+    });
+
+    await reply(
+        ctx,
+        '🔄 Preparing WhatsApp pairing...\n\n' +
+        `📱 Number: ${number}\n\n` +
+        'Please wait.'
+    );
+
+    try {
+        /*
+         * Delete/close stale pairing material first.
+         *
+         * This is especially important after a previous failed pairing.
+         */
+        try {
+            await prepareFreshPairing(userId);
+        } catch (cleanupError) {
+            console.error(
+                '[PAIR PRE-CLEANUP]',
+                cleanupError?.stack || cleanupError
+            );
+
+            /*
+             * Do not immediately abort if cleanup merely found
+             * nothing to clean.
+             */
+        }
+
+        /*
+         * Check that the user has not cancelled the operation while
+         * cleanup was happening.
+         */
+        const currentState = states[userId];
+
+        if (
+            !currentState ||
+            !currentState.active
+        ) {
+            return true;
+        }
+
+        setPairingState(userId, {
+            ...currentState,
+            active: true,
+            stage: 'requesting_code',
+            phoneNumber: number,
+            updatedAt: Date.now()
+        });
+
+        /*
+         * createWhatsAppSession is responsible for:
+         *
+         * - creating Baileys socket
+         * - loading auth state
+         * - requesting pairing code
+         * - storing the session
+         * - handling connection events
+         *
+         * It must NOT install Telegram text listeners.
+         */
+        const session = await createWhatsAppSession(
+            userId,
+            number,
+            ctx,
+            {
+                pairing: true
+            }
+        );
+
+        /*
+         * If /stop cancelled the operation while the socket was being
+         * created, do not continue sending pairing messages.
+         */
+        const afterCreate = states[userId];
+
+        if (
+            !afterCreate ||
+            !afterCreate.active
+        ) {
+            return true;
+        }
+
+        if (!session) {
+            clearPairingState(userId);
+
+            return reply(
+                ctx,
+                '❌ WhatsApp session could not be created.\n\n' +
+                'The pairing operation has been reset.\n\n' +
+                'Use /pair to try again.'
+            );
+        }
+
+        /*
+         * createWhatsAppSession should store the generated code on:
+         *
+         * global.sessions[userId].pairingCode
+         */
+        const sessionRecord =
+            getWhatsAppSession(userId) ||
+            session;
+
+        const pairingCode =
+            sessionRecord?.pairingCode || null;
+
+        if (pairingCode) {
+            setPairingState(userId, {
+                ...afterCreate,
+                active: true,
+                stage: 'waiting_connection',
+                phoneNumber: number,
+                pairingCode,
+                updatedAt: Date.now()
+            });
+
+            /*
+             * The connection result itself is handled by the
+             * WhatsApp session lifecycle.
+             */
+            return reply(
+                ctx,
+                '🔐 WhatsApp pairing code:\n\n' +
+                `${pairingCode}\n\n` +
+                'Open WhatsApp on the phone you want to link and enter this code.\n\n' +
+                '⏳ Waiting for WhatsApp to finish linking...\n\n' +
+                'Use /stop to cancel this pairing.'
+            );
+        }
+
+        /*
+         * Some Baileys/environment combinations may not expose the
+         * pairing code immediately. Leave the state alive briefly so
+         * the connection layer can finish its work.
+         */
+        setPairingState(userId, {
+            ...afterCreate,
+            active: true,
+            stage: 'waiting_connection',
+            phoneNumber: number,
+            pairingCode: null,
+            updatedAt: Date.now()
+        });
+
+        return reply(
+            ctx,
+            '📡 WhatsApp pairing has started.\n\n' +
+            'The pairing code is being prepared.\n\n' +
+            'Check your WhatsApp linking screen and wait for the bot to report the result.'
+        );
+    } catch (error) {
+        console.error(
+            '[PAIR CREATE]',
+            error?.stack || error
+        );
+
+        /*
+         * Only clear the state if it still belongs to this pairing
+         * operation. A new /pair operation must never be wiped out by
+         * an old asynchronous error.
+         */
+        const current = states[userId];
+
+        if (current?.phoneNumber === number) {
+            clearPairingState(userId);
+        }
+
+        let message =
+            '❌ Pairing failed.\n\n';
+
+        const reason =
+            error?.message ||
+            error?.output?.payload?.message ||
+            'Unknown error';
+
+        /*
+         * Keep Telegram output useful without dumping internal
+         * stack traces to the user.
+         */
+        if (
+            /401|logged.?out|unauthorized/i.test(reason)
+        ) {
+            message +=
+                'WhatsApp rejected the session.\n\n';
+        } else if (
+            /timeout|timed out/i.test(reason)
+        ) {
+            message +=
+                'The pairing request timed out.\n\n';
+        } else {
+            message +=
+                'The WhatsApp connection could not be started.\n\n';
+        }
+
+        message +=
+            'The pairing state has been reset.\n\n' +
+            'Use /pair to try again.';
+
+        return reply(ctx, message);
+    }
+
+    /*
+     * The number was definitely consumed.
+     */
+    return true;
+}
+
+/*
+|--------------------------------------------------------------------------
+| CANCEL PAIRING
+|--------------------------------------------------------------------------
+|
+| Used by telegram/stop.js.
+|
+|--------------------------------------------------------------------------
+*/
+
+function cancelPairing(userId) {
+    userId = String(userId || '');
+
+    if (!userId) {
+        return null;
+    }
+
+    const state = getPairingState(userId);
+
+    if (!state) {
+        return null;
+    }
+
+    clearPairingState(userId);
+
+    return state;
+}
+
+/*
+|--------------------------------------------------------------------------
+| GET STATE
+|--------------------------------------------------------------------------
+*/
+
+function getPairingStatus(userId) {
+    userId = String(userId || '');
+
+    const state = getPairingState(userId);
+
+    if (!state) {
+        return null;
+    }
+
+    return {
+        active: Boolean(state.active),
+        stage: state.stage || null,
+        phoneNumber: state.phoneNumber || null,
+        pairingCode: state.pairingCode || null,
+        startedAt: state.startedAt || null,
+        updatedAt: state.updatedAt || null
+    };
+}
+
+/*
+|--------------------------------------------------------------------------
+| EXPORTS
+|--------------------------------------------------------------------------
+*/
+
 module.exports = pairCommand;
+
+module.exports.handlePairNumber = handlePairNumber;
+module.exports.cancelPairing = cancelPairing;
+module.exports.clearPairingState = clearPairingState;
+module.exports.getPairingStatus = getPairingStatus;
+module.exports.normalizePhoneNumber = normalizePhoneNumber;
+module.exports.isPairingActive = isPairingActive;
