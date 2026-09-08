@@ -3,8 +3,6 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = requi
 const { Boom } = require('@hapi/boom');
 const fetch = require('node-fetch');
 const fs = require('fs');
-const path = require('path');
-const ytdl = require('ytdl-core');
 const sharp = require('sharp');
 
 // ============================================================
@@ -16,7 +14,7 @@ const OWNER_NUMBER = config.ownerNumber.replace(/\D/g, '');
 const BOT_NAME = config.botName;
 const OWNER_NAME = config.ownerName;
 const CO_OWNERS = config.coOwners.map(n => n.replace(/\D/g, ''));
-const AUTO_DELETE_LOADING = config.autoDeleteLoading;
+const AUTO_DELETE_LOADING = config.autoDeleteLoading !== undefined ? config.autoDeleteLoading : true;
 const VV_METHODS = config.vvMethods || 5;
 const PLAY_SOURCES = config.playSources || 3;
 
@@ -78,7 +76,7 @@ function updateAntiSettings(groupId, type, key, value) {
 // ============================================================
 const bot = new Telegraf(BOT_TOKEN);
 const sessions = {};
-const pairingStates = {}; // Store temporary pairing states
+const pairingStates = {};
 
 // Command queue - first come first serve
 let commandQueue = [];
@@ -102,7 +100,6 @@ function enqueueCommand(task) {
     if (!isProcessing) processQueue();
 }
 
-// Sleep helper
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -111,7 +108,6 @@ function sleep(ms) {
 //  TELEGRAM COMMANDS
 // ============================================================
 
-// ---------- /start ----------
 bot.start((ctx) => {
     ctx.reply(
         `⚔️ *${BOT_NAME} v11*\n` +
@@ -125,7 +121,6 @@ bot.start((ctx) => {
     );
 });
 
-// ---------- /help ----------
 bot.help((ctx) => {
     const helpText = 
 `⚔️ *${BOT_NAME} v11 – Full Command List*
@@ -166,7 +161,7 @@ bot.help((ctx) => {
 .antibot       → Block other bots
 
 All anti commands have 6 options:
-on/off | kick/delete/warn | admin on/off | warns <n> | resetwarns | clearwarns @tag
+on/off | kick/delete|warn | admin on/off | warns <n> | resetwarns | clearwarns @tag
 
 ───────────
 📲 *TELEGRAM COMMANDS*
@@ -188,17 +183,14 @@ Menu, ping, vv, sticker, groupinfo, anti warnings → Private (only you see).`;
 bot.command('pair', async (ctx) => {
     const userId = ctx.from.id;
 
-    // Check if already has session
     if (sessions[userId] && sessions[userId].connected) {
         return ctx.reply('⚠️ You already have an active WhatsApp session. Use /status to check.');
     }
 
-    // Check if already in pairing state
     if (pairingStates[userId]) {
         return ctx.reply('⏳ You already have a pending pairing request. Send your number now.');
     }
 
-    // Ask for number
     await ctx.reply(
         `📱 Please send your WhatsApp number with country code.\n` +
         `Example: 2349012345678 (Nigeria)\n` +
@@ -206,10 +198,8 @@ bot.command('pair', async (ctx) => {
         `⏳ Send your number in the next 30 seconds.`
     );
 
-    // Set pairing state
     pairingStates[userId] = { step: 'awaiting_number', timestamp: Date.now() };
 
-    // Auto-cancel after 30 seconds
     setTimeout(() => {
         if (pairingStates[userId]) {
             delete pairingStates[userId];
@@ -223,23 +213,18 @@ bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
     const text = ctx.message.text.trim();
 
-    // If user is in pairing state
     if (pairingStates[userId] && pairingStates[userId].step === 'awaiting_number') {
-        // Validate number
         const cleanNumber = text.replace(/\D/g, '');
         if (cleanNumber.length < 10 || cleanNumber.length > 15) {
             return ctx.reply('❌ Invalid number. Use format: 2349012345678 (country code + number)');
         }
 
-        // Check if starts with country code (234)
         if (!cleanNumber.startsWith('234')) {
             return ctx.reply('❌ Please include Nigeria country code (234) before your number.\nExample: 2349012345678');
         }
 
-        // Clear pairing state
         delete pairingStates[userId];
 
-        // Start pairing process
         await ctx.reply(`⏳ Generating pairing code for ${cleanNumber}...\nPlease wait 5-10 seconds while I connect...`);
 
         try {
@@ -252,7 +237,6 @@ bot.on('text', async (ctx) => {
                 browser: ['SolvaX MD', 'Chrome', '1.0.0'],
             });
 
-            // Wait for socket to be ready with timeout
             let socketReady = false;
             let attempts = 0;
             const maxAttempts = 10;
@@ -272,10 +256,8 @@ bot.on('text', async (ctx) => {
                 return;
             }
 
-            // Request pairing code
             const code = await sock.requestPairingCode(cleanNumber);
             
-            // Store session
             sessions[userId] = {
                 sock,
                 saveCreds,
@@ -325,17 +307,14 @@ bot.on('text', async (ctx) => {
                 const isGroup = sender.endsWith('@g.us');
                 const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').toLowerCase();
 
-                // Check if this user is the one who paired
                 const isPairedUser = senderNumber === cleanNumber || sender === cleanNumber + '@s.whatsapp.net';
                 if (!isPairedUser) return;
 
-                // Enqueue command
                 enqueueCommand(async () => {
                     await handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, text, userId);
                 });
             });
 
-            // Send pairing code
             await ctx.reply(
                 `🔑 *Pairing Code:* \`${code}\`\n\n` +
                 `Open WhatsApp → Linked Devices → Link with phone number\n` +
@@ -428,7 +407,6 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         } catch (e) { return false; }
     };
 
-    // Send loading message with auto-delete
     async function sendLoading(loadingText) {
         if (!AUTO_DELETE_LOADING) {
             return await sock.sendMessage(sender, { text: loadingText });
@@ -515,7 +493,6 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
                     }
                 }
                 if (method === 4) {
-                    // Try alternative decryption
                     const media = await sock.downloadMediaMessage(msg);
                     if (media) {
                         await sock.sendMessage(sender, { image: media, caption: '🔓 View-once decrypted!' });
@@ -524,7 +501,6 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
                     }
                 }
                 if (method === 5) {
-                    // Final attempt
                     const media = await sock.downloadMediaMessage(msg);
                     if (media) {
                         await sock.sendMessage(sender, { image: media, caption: '🔓 View-once decrypted!' });
@@ -532,9 +508,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
                         break;
                     }
                 }
-            } catch (e) {
-                // Continue to next method
-            }
+            } catch (e) {}
         }
 
         if (!success) {
@@ -545,7 +519,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         return;
     }
 
-    // ---------- .play (Music - 3 Sources) ----------
+    // ---------- .play (Music - API only, NO ytdl) ----------
     if (text.startsWith('.play ')) {
         const song = text.replace('.play ', '');
         await sendLoading(`⏳ Searching for: ${song}`);
@@ -554,27 +528,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         let attempts = 0;
         const maxAttempts = PLAY_SOURCES;
 
-        // Source 1: ytdl-core
-        if (!success && attempts < maxAttempts) {
-            attempts++;
-            try {
-                const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(song)}`;
-                const searchResponse = await fetch(searchUrl);
-                const html = await searchResponse.text();
-                const videoId = html.match(/watch\?v=([a-zA-Z0-9_-]{11})/)?.[1];
-                if (videoId) {
-                    const stream = ytdl(`https://www.youtube.com/watch?v=${videoId}`, { filter: 'audioonly' });
-                    await sock.sendMessage(sender, {
-                        audio: stream,
-                        mimetype: 'audio/mpeg',
-                        fileName: `${song}.mp3`
-                    });
-                    success = true;
-                }
-            } catch (e) {}
-        }
-
-        // Source 2: Third-party API
+        // Source 1: Ryzendesu API
         if (!success && attempts < maxAttempts) {
             attempts++;
             try {
@@ -594,7 +548,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
             } catch (e) {}
         }
 
-        // Source 3: Alternative API
+        // Source 2: Vevioz API
         if (!success && attempts < maxAttempts) {
             attempts++;
             try {
@@ -614,13 +568,34 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
             } catch (e) {}
         }
 
+        // Source 3: Alternative (if any)
+        if (!success && attempts < maxAttempts) {
+            attempts++;
+            try {
+                // Another fallback – can add here
+                const apiUrl = `https://api.someother.com/ytmp3?q=${encodeURIComponent(song)}`;
+                const response = await fetch(apiUrl);
+                const data = await response.json();
+                if (data.url) {
+                    const audioResponse = await fetch(data.url);
+                    const buffer = await audioResponse.buffer();
+                    await sock.sendMessage(sender, {
+                        audio: buffer,
+                        mimetype: 'audio/mpeg',
+                        fileName: `${song}.mp3`
+                    });
+                    success = true;
+                }
+            } catch (e) {}
+        }
+
         if (!success) {
             await sock.sendMessage(sender, { text: '⚠️ All music sources are busy.\nTry again in 5 minutes.' });
         }
         return;
     }
 
-    // ---------- .video (Video - 3 Sources) ----------
+    // ---------- .video (Video - API only) ----------
     if (text.startsWith('.video ')) {
         const video = text.replace('.video ', '');
         await sendLoading(`⏳ Searching for video: ${video}`);
@@ -629,27 +604,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
         let attempts = 0;
         const maxAttempts = PLAY_SOURCES;
 
-        // Source 1: ytdl-core
-        if (!success && attempts < maxAttempts) {
-            attempts++;
-            try {
-                const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(video)}`;
-                const searchResponse = await fetch(searchUrl);
-                const html = await searchResponse.text();
-                const videoId = html.match(/watch\?v=([a-zA-Z0-9_-]{11})/)?.[1];
-                if (videoId) {
-                    const stream = ytdl(`https://www.youtube.com/watch?v=${videoId}`, { filter: 'audioandvideo' });
-                    await sock.sendMessage(sender, {
-                        video: stream,
-                        mimetype: 'video/mp4',
-                        fileName: `${video}.mp4`
-                    });
-                    success = true;
-                }
-            } catch (e) {}
-        }
-
-        // Source 2: Third-party API
+        // Source 1: Ryzendesu API
         if (!success && attempts < maxAttempts) {
             attempts++;
             try {
@@ -669,7 +624,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
             } catch (e) {}
         }
 
-        // Source 3: Alternative API
+        // Source 2: Vevioz API
         if (!success && attempts < maxAttempts) {
             attempts++;
             try {
@@ -678,6 +633,27 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
                 const data = await response.json();
                 if (data.download) {
                     const videoResponse = await fetch(data.download);
+                    const buffer = await videoResponse.buffer();
+                    await sock.sendMessage(sender, {
+                        video: buffer,
+                        mimetype: 'video/mp4',
+                        fileName: `${video}.mp4`
+                    });
+                    success = true;
+                }
+            } catch (e) {}
+        }
+
+        // Source 3: Alternative
+        if (!success && attempts < maxAttempts) {
+            attempts++;
+            try {
+                // Another fallback
+                const apiUrl = `https://api.someother.com/ytmp4?q=${encodeURIComponent(video)}`;
+                const response = await fetch(apiUrl);
+                const data = await response.json();
+                if (data.url) {
+                    const videoResponse = await fetch(data.url);
                     const buffer = await videoResponse.buffer();
                     await sock.sendMessage(sender, {
                         video: buffer,
@@ -721,14 +697,12 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
             const [artist, title] = song.split(' - ').map(s => s.trim());
             let lyricText = '';
 
-            // Method 1: Lyrics.ovh API
             try {
                 const response = await fetch(`https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`);
                 const data = await response.json();
                 if (data.lyrics) lyricText = data.lyrics;
             } catch (e) {}
 
-            // Method 2: Alternative source
             if (!lyricText) {
                 try {
                     const response = await fetch(`https://some-lyrics-api.com/search?q=${encodeURIComponent(song)}`);
