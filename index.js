@@ -265,6 +265,9 @@ async function handleWhatsAppCommand(
     const handler = COMMANDS.get(command);
 
     if (!handler) {
+        console.log(
+            `[COMMAND] Unknown command .${command} for ${key}`
+        );
         return;
     }
 
@@ -331,9 +334,18 @@ async function handleWhatsAppCommand(
 
         isOwner,
 
+        /*
+         * IMPORTANT:
+         *
+         * sendReply() expects:
+         *
+         * sendReply(userId, jid, text, options)
+         *
+         * Therefore we pass `key`, not `session.socket`.
+         */
         send: async (message, options = {}) => {
             return sendReply(
-                session.socket,
+                key,
                 jid,
                 message,
                 options
@@ -342,7 +354,7 @@ async function handleWhatsAppCommand(
 
         reply: async (message, options = {}) => {
             return sendReply(
-                session.socket,
+                key,
                 jid,
                 message,
                 options
@@ -379,8 +391,12 @@ async function handleWhatsAppCommand(
         );
 
         try {
+            /*
+             * IMPORTANT:
+             * sendReply() expects userId first.
+             */
             await sendReply(
-                session.socket,
+                key,
                 jid,
                 '❌ Command failed. Please try again.'
             );
