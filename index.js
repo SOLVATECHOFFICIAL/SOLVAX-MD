@@ -24,7 +24,7 @@ if (!BOT_TOKEN) {
 }
 
 // ============================================================
-//  DATABASE WITH WRITE QUEUE
+//  DATABASE WITH WRITE QUEUE (prevents corruption)
 // ============================================================
 const DB_FILE = './database.json';
 let db = { antilink: {}, antimention: {}, antiviewonce: {}, antibot: {} };
@@ -76,9 +76,9 @@ function updateAntiSettings(groupId, type, key, value) {
 // ============================================================
 const bot = new Telegraf(BOT_TOKEN);
 const sessions = {};
-const pairingStates = {}; // { userId: { step, timestamp, timeoutId } }
+const pairingStates = {};
 
-// Command queue - first come first serve
+// Command queue – first come, first serve
 let commandQueue = [];
 let isProcessing = false;
 
@@ -198,13 +198,12 @@ bot.command('pair', async (ctx) => {
         `⏳ Send your number in the next 90 seconds.`
     );
 
-    // Set timeout to auto-cancel after 90 seconds
     const timeoutId = setTimeout(() => {
         if (pairingStates[userId]) {
             delete pairingStates[userId];
             ctx.reply('⏳ Pairing request timed out. Send /pair again to start over.');
         }
-    }, 90000); // 90 seconds
+    }, 90000);
 
     pairingStates[userId] = {
         step: 'awaiting_number',
@@ -219,7 +218,6 @@ bot.on('text', async (ctx) => {
     const text = ctx.message.text.trim();
 
     if (pairingStates[userId] && pairingStates[userId].step === 'awaiting_number') {
-        // Clear the timeout so it doesn't fire after we've received the number
         if (pairingStates[userId].timeoutId) {
             clearTimeout(pairingStates[userId].timeoutId);
         }
@@ -235,7 +233,7 @@ bot.on('text', async (ctx) => {
 
         delete pairingStates[userId];
 
-        await ctx.reply(`⏳ Generating pairing code for ${cleanNumber}...\nPlease wait 5-10 seconds while I connect...`);
+        await ctx.reply(`⏳ Generating pairing code for ${cleanNumber}...\nPlease wait up to 30 seconds while I connect...`);
 
         try {
             const sessionFolder = `auth_tg_${userId}`;
@@ -247,16 +245,16 @@ bot.on('text', async (ctx) => {
                 browser: ['SolvaX MD', 'Chrome', '1.0.0'],
             });
 
-            // Wait for socket to be ready with timeout
+            // Wait for socket to be ready – up to 30 seconds
             let socketReady = false;
             let attempts = 0;
-            const maxAttempts = 10;
+            const maxAttempts = 30;
 
             while (attempts < maxAttempts && !socketReady) {
                 await sleep(1000);
                 attempts++;
                 try {
-                    if (sock.ws?.readyState === 1) {
+                    if (sock.ws?.readyState === 1 || sock.user) {
                         socketReady = true;
                     }
                 } catch (e) {}
@@ -579,7 +577,7 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
             } catch (e) {}
         }
 
-        // Source 3: Alternative (add another)
+        // Source 3: Alternative (add your own or leave as placeholder)
         if (!success && attempts < maxAttempts) {
             attempts++;
             try {
@@ -706,12 +704,14 @@ async function handleWhatsAppCommand(sock, msg, sender, senderNumber, isGroup, t
             const [artist, title] = song.split(' - ').map(s => s.trim());
             let lyricText = '';
 
+            // Method 1: Lyrics.ovh API
             try {
                 const response = await fetch(`https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`);
                 const data = await response.json();
                 if (data.lyrics) lyricText = data.lyrics;
             } catch (e) {}
 
+            // Method 2: Fallback (if needed)
             if (!lyricText) {
                 try {
                     const response = await fetch(`https://some-lyrics-api.com/search?q=${encodeURIComponent(song)}`);
@@ -1124,6 +1124,8 @@ ${admins.map(a => a).join('\n')}`;
 //  START BOT
 // ============================================================
 bot.launch().then(() => {
+    // Clear any old webhook to prevent 409 conflict
+    bot.telegram.setWebhook('').catch(() => {});
     console.log('🤖 SolvaX MD Telegram bot running...');
     console.log('⚔️ SolvaX MD v11 is ready!');
     console.log(`📱 Owner: ${OWNER_NUMBER}`);
