@@ -209,7 +209,7 @@ async function processQueue() {
 }
 
 // ============================================================
-// WHATSAPP CONNECTION
+// WHATSAPP RECONNECTION HELPER
 // ============================================================
 
 async function createWhatsAppSession(userId, number, telegramContext) {
@@ -627,7 +627,7 @@ bot.on('text', async ctx => {
 
     try {
         // ----------------------------------------------------
-        // CREATE WHATSAPP SOCKET
+        // CREATE SOCKET
         // ----------------------------------------------------
 
         const sessionFolder = `auth_tg_${userId}`;
@@ -646,112 +646,44 @@ bot.on('text', async ctx => {
                 '10.15.7'
             ],
             markOnlineOnConnect: false,
-            syncFullHistory: false
+            syncFullHistory: false,
+            // Helps with pairing
+            patchMessageBeforeSending: true
         });
 
         // Save credentials
         sock.ev.on('creds.update', saveCreds);
 
         // ----------------------------------------------------
-        // REQUEST PAIRING CODE WHEN BAILEYS STARTS CONNECTING
+        // REQUEST PAIRING CODE WITH DELAY + RETRY
         // ----------------------------------------------------
 
-        let pairingCodeRequested = false;
-        let pairingCodeResolve;
-        let pairingCodeReject;
+        let code;
 
-        const pairingCodePromise = new Promise((resolve, reject) => {
-            pairingCodeResolve = resolve;
-            pairingCodeReject = reject;
-        });
+        // Wait 1.5 seconds for the socket to stabilise
+        await sleep(1500);
 
-        const pairingTimeout = setTimeout(() => {
-            pairingCodeReject(
-                new Error('Timed out waiting for WhatsApp to start connecting')
-            );
-        }, 20000);
-
-        sock.ev.on('connection.update', async (update) => {
-
-            const {
-                connection,
-                qr,
-                lastDisconnect
-            } = update;
-
-            // ------------------------------------------------
-            // BAILEYS HAS STARTED CONNECTING
-            // ------------------------------------------------
-
-            if (
-                !pairingCodeRequested &&
-                !state.creds.registered &&
-                (connection === 'connecting' || qr)
-            ) {
-
-                pairingCodeRequested = true;
-
-                try {
-
-                    console.log(
-                        `[PAIR] WhatsApp connecting for ${clean}`
-                    );
-
-                    const code =
-                        await sock.requestPairingCode(clean);
-
-                    clearTimeout(pairingTimeout);
-
-                    console.log(
-                        `[PAIR] Pairing code generated: ${code}`
-                    );
-
-                    pairingCodeResolve(code);
-
-                } catch (err) {
-
-                    clearTimeout(pairingTimeout);
-
-                    console.error(
-                        '[PAIR] Pairing code error:',
-                        err
-                    );
-
-                    pairingCodeReject(err);
-                }
+        // First attempt
+        try {
+            code = await sock.requestPairingCode(clean);
+            console.log(`[PAIR] Code generated: ${code}`);
+        } catch (err) {
+            console.log('[PAIR] First attempt failed, retrying...', err.message);
+            // Wait another 2 seconds then retry once
+            await sleep(2000);
+            try {
+                code = await sock.requestPairingCode(clean);
+                console.log(`[PAIR] Code generated on retry: ${code}`);
+            } catch (err2) {
+                console.error('[PAIR] Both attempts failed:', err2);
+                throw new Error('Could not get pairing code after two attempts.');
             }
+        }
 
-            // ------------------------------------------------
-            // CONNECTION OPEN
-            // ------------------------------------------------
-
-            if (connection === 'open') {
-
-                console.log(
-                    `[WHATSAPP] Connected: ${clean}`
-                );
-            }
-
-            // ------------------------------------------------
-            // CONNECTION CLOSED
-            // ------------------------------------------------
-
-            if (connection === 'close') {
-
-                const statusCode =
-                    lastDisconnect?.error?.output?.statusCode;
-
-                console.log(
-                    `[WHATSAPP] Connection closed. Status: ${statusCode || 'unknown'}`
-                );
-            }
-        });
-
-        // ----------------------------------------------------
-        // WAIT FOR THE ACTUAL PAIRING CODE
-        // ----------------------------------------------------
-
-        const code = await pairingCodePromise;
+        // If we still don't have a code, throw.
+        if (!code) {
+            throw new Error('No pairing code received.');
+        }
 
         // ----------------------------------------------------
         // STORE SESSION
@@ -769,15 +701,102 @@ bot.on('text', async ctx => {
         };
 
         // ----------------------------------------------------
-        // CONNECTION EVENTS (already attached above, but we keep them)
-        // The connection.update listener is already defined.
-        // We still need to forward the open/close to the session.
-        // We'll just rely on the listener above.
+        // CONNECTION EVENTS (to handle open/close)
+        // ----------------------------------------------------
+
+        sock.ev.on('connection.update', async update => {
+            const {
+                connection,
+                lastDisconnect
+            } = update;
+
+            const session =
+                sessions[userId];
+
+            if (!session) return;
+
+            if (connection === 'open') {
+                session.connected = true;
+                session.state = 'connected';
+                session.reconnecting = false;
+
+                console.log(
+                    `✅ WhatsApp connected: ${clean}`
+                );
+
+                try {
+                    await bot.telegram.sendMessage(
+                        userId,
+                        `✅ *WhatsApp connected successfully!*\n\n` +
+                        `📱 Number: ${clean}\n\n` +
+                        `Send .menu on WhatsApp to get started.`,
+                        {
+                            parse_mode: 'Markdown'
+                        }
+                    );
+                } catch (e) {}
+            }
+
+            if (connection === 'close') {
+                session.connected = false;
+
+                const loggedOut =
+                    isLoggedOut(
+                        lastDisconnect?.error
+                    );
+
+                if (
+                    loggedOut ||
+                    session.stopped
+                ) {
+                    delete sessions[userId];
+
+                    try {
+                        await bot.telegram.sendMessage(
+                            userId,
+                            '🔴 WhatsApp was logged out.\n\nUse /pair to link it again.'
+                        );
+                    } catch (e) {}
+
+                    return;
+                }
+
+                if (session.reconnecting) {
+                    return;
+                }
+
+                session.reconnecting = true;
+                session.state = 'connecting';
+
+                console.log(
+                    `♻️ Reconnecting ${clean}...`
+                );
+
+                try {
+                    await sleep(3000);
+
+                    if (
+                        sessions[userId] &&
+                        !sessions[userId].stopped
+                    ) {
+                        await createWhatsAppSession(
+                            userId,
+                            clean,
+                            ctx
+                        );
+                    }
+                } catch (error) {
+                    console.error(
+                        'Reconnect error:',
+                        error.message
+                    );
+                }
+            }
+        });
 
         // ----------------------------------------------------
-        // MESSAGE HANDLER (attached inside createWhatsAppSession? Actually we already have it above)
-        // We'll attach it here as well – but we can reuse the existing one.
-        // We'll add a new one to be safe.
+        // MESSAGE HANDLER
+        // ----------------------------------------------------
 
         sock.ev.on(
             'messages.upsert',
@@ -1160,16 +1179,12 @@ async function handleWhatsAppCommand(
             try {
                 let media = null;
 
-                // ----------------------------------------------------
-                // METHOD 1: Baileys downloadMediaMessage()
-                // ----------------------------------------------------
+                // Method 1
                 if (method === 1) {
                     media = await sock.downloadMediaMessage(msg);
                 }
 
-                // ----------------------------------------------------
-                // METHOD 2: Extract URL from message
-                // ----------------------------------------------------
+                // Method 2
                 if (method === 2 && !media) {
                     const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
                     if (msgObj?.imageMessage?.url) {
@@ -1183,9 +1198,7 @@ async function handleWhatsAppCommand(
                     }
                 }
 
-                // ----------------------------------------------------
-                // METHOD 3: Extract with mediaKey
-                // ----------------------------------------------------
+                // Method 3
                 if (method === 3 && !media) {
                     const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
                     if (msgObj?.imageMessage?.mediaKey || msgObj?.videoMessage?.mediaKey) {
@@ -1193,9 +1206,7 @@ async function handleWhatsAppCommand(
                     }
                 }
 
-                // ----------------------------------------------------
-                // METHOD 4: Force download via Baileys internal
-                // ----------------------------------------------------
+                // Method 4
                 if (method === 4 && !media) {
                     try {
                         const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
@@ -1214,16 +1225,11 @@ async function handleWhatsAppCommand(
                     } catch (e) {}
                 }
 
-                // ----------------------------------------------------
-                // METHOD 5: Last resort – use Baileys again
-                // ----------------------------------------------------
+                // Method 5
                 if (method === 5 && !media) {
                     media = await sock.downloadMediaMessage(msg);
                 }
 
-                // ----------------------------------------------------
-                // If we got media, send it
-                // ----------------------------------------------------
                 if (media) {
                     const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
                     if (msgObj?.imageMessage) {
@@ -1635,7 +1641,6 @@ async function handleWhatsAppCommand(
             const lyrics =
                 String(data.lyrics);
 
-            // Avoid sending an absurdly large Telegram/WhatsApp message.
             const limitedLyrics =
                 lyrics.length > 6000
                     ? lyrics.slice(0, 6000) +
