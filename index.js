@@ -1145,3 +1145,158 @@ async function shutdown(signal) {
 
     /*
      * Stop Telegram polling/webhook.
+     */
+    try {
+        bot.stop(signal);
+
+        console.log(
+            '🔴 Telegram bot stopped.'
+        );
+    } catch (error) {
+        console.error(
+            '[TELEGRAM STOP]',
+            error?.stack || error
+        );
+    }
+
+    /*
+     * Stop all active WhatsApp sockets.
+     *
+     * IMPORTANT:
+     * stopWhatsAppSession() should close the socket without deleting
+     * authentication unless explicitly requested.
+     */
+    const userIds =
+        Object.keys(
+            global.sessions
+        );
+
+    for (const userId of userIds) {
+        try {
+            await stopWhatsAppSession(
+                userId,
+                {
+                    removeAuth: false
+                }
+            );
+
+            console.log(
+                `[SHUTDOWN] WhatsApp session stopped: ${userId}`
+            );
+        } catch (error) {
+            console.error(
+                `[SHUTDOWN] Failed for ${userId}`,
+                error?.stack || error
+            );
+        }
+    }
+
+    /*
+     * Clear pending pairing timers/states.
+     */
+    for (
+        const userId of Object.keys(
+            global.pairingStates
+        )
+    ) {
+        const state =
+            global.pairingStates[userId];
+
+        if (
+            state?.timeout
+        ) {
+            clearTimeout(
+                state.timeout
+            );
+        }
+
+        delete global.pairingStates[
+            userId
+        ];
+    }
+
+    console.log(
+        '🟢 SOLVAX MD shutdown complete.'
+    );
+
+    process.exit(0);
+}
+
+/*
+|--------------------------------------------------------------------------
+| PROCESS SIGNALS
+|--------------------------------------------------------------------------
+*/
+
+process.once(
+    'SIGINT',
+    () => {
+        shutdown('SIGINT');
+    }
+);
+
+process.once(
+    'SIGTERM',
+    () => {
+        shutdown('SIGTERM');
+    }
+);
+
+/*
+|--------------------------------------------------------------------------
+| UNHANDLED ERRORS
+|--------------------------------------------------------------------------
+*/
+
+process.on(
+    'unhandledRejection',
+    error => {
+        console.error(
+            '[UNHANDLED REJECTION]',
+            error?.stack || error
+        );
+    }
+);
+
+process.on(
+    'uncaughtException',
+    error => {
+        console.error(
+            '[UNCAUGHT EXCEPTION]',
+            error?.stack || error
+        );
+    }
+);
+
+/*
+|--------------------------------------------------------------------------
+| START
+|--------------------------------------------------------------------------
+*/
+
+startBot()
+    .catch(error => {
+        console.error(
+            '❌ SOLVAX MD failed to start:',
+            error?.stack || error
+        );
+
+        process.exit(1);
+    });
+
+/*
+|--------------------------------------------------------------------------
+| EXPORTS
+|--------------------------------------------------------------------------
+|
+| Exporting these makes the router usable in tests or by another
+| module without starting another Telegram bot instance.
+|--------------------------------------------------------------------------
+*/
+
+module.exports = {
+    bot,
+    handleWhatsAppCommand,
+    loadWhatsAppCommands,
+    resolveCommand
+};
