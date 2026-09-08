@@ -1,5 +1,28 @@
 'use strict';
 
+/*
+ * =========================================================
+ * SOLVAX MD
+ * index.js
+ * =========================================================
+ *
+ * MAIN APPLICATION ENTRY POINT
+ *
+ * RESPONSIBILITIES
+ * ---------------------------------------------------------
+ * 1. Start Telegram bot
+ * 2. Load WhatsApp commands
+ * 3. Receive WhatsApp messages
+ * 4. Allow ONLY the linked WhatsApp account to control
+ *    the bot
+ * 5. Dispatch .menu, .vv, .ping, etc.
+ * 6. Handle Telegram pairing
+ * 7. Handle Telegram status/help/stop
+ * 8. Restore WhatsApp sessions
+ *
+ * =========================================================
+ */
+
 const fs = require('fs');
 const path = require('path');
 
@@ -17,18 +40,45 @@ const {
     getPairingState
 } = require('./lib/whatsapp');
 
-const configPath = path.join(process.cwd(), 'config.json');
+const configPath =
+    path.join(
+        process.cwd(),
+        'config.json'
+    );
 
 let config = {};
 
+
+/* =========================================================
+   LOAD CONFIG
+========================================================= */
+
 try {
-    if (fs.existsSync(configPath)) {
-        config = require(configPath);
+
+    if (
+        fs.existsSync(
+            configPath
+        )
+    ) {
+
+        config =
+            require(configPath);
     }
+
 } catch (error) {
-    console.error('[CONFIG] Failed to load config.json:', error);
+
+    console.error(
+        '[CONFIG] Failed to load config.json:',
+        error
+    );
+
     config = {};
 }
+
+
+/* =========================================================
+   TELEGRAM BOT TOKEN
+========================================================= */
 
 const BOT_TOKEN =
     process.env.BOT_TOKEN ||
@@ -38,6 +88,7 @@ const BOT_TOKEN =
     '';
 
 if (!BOT_TOKEN) {
+
     console.error(
         '❌ Telegram bot token is missing.\n\n' +
         'Set BOT_TOKEN in Railway environment variables or config.json.'
@@ -46,170 +97,383 @@ if (!BOT_TOKEN) {
     process.exit(1);
 }
 
-const bot = new Telegraf(BOT_TOKEN);
-
-global.bot = bot;
-global.sessions = global.sessions || {};
-global.pairingStates = global.pairingStates || {};
-
-const COMMANDS = new Map();
 
 /* =========================================================
-   COMMAND REGISTRATION
+   TELEGRAM BOT
 ========================================================= */
 
-function normalizeCommandName(name) {
-    if (!name) return '';
+const bot =
+    new Telegraf(
+        BOT_TOKEN
+    );
+
+
+/*
+ * Make bot available globally.
+ */
+global.bot = bot;
+
+
+/*
+ * Make session objects available globally.
+ *
+ * lib/whatsapp.js also initializes these, but keeping
+ * the references here makes the application consistent.
+ */
+global.sessions =
+    global.sessions || {};
+
+global.pairingStates =
+    global.pairingStates || {};
+
+
+/* =========================================================
+   WHATSAPP COMMAND REGISTRY
+========================================================= */
+
+const COMMANDS =
+    new Map();
+
+
+/* =========================================================
+   COMMAND NAME NORMALIZER
+========================================================= */
+
+function normalizeCommandName(
+    name
+) {
+
+    if (!name) {
+        return '';
+    }
 
     return String(name)
         .trim()
         .toLowerCase()
-        .replace(/^\./, '')
-        .replace(/@\S+$/, '');
+        .replace(
+            /^\./,
+            ''
+        )
+        .replace(
+            /@\S+$/,
+            ''
+        );
 }
 
-function registerCommand(name, handler) {
-    if (!name || typeof handler !== 'function') {
+
+/* =========================================================
+   REGISTER COMMAND
+========================================================= */
+
+function registerCommand(
+    name,
+    handler
+) {
+
+    if (
+        !name ||
+        typeof handler !== 'function'
+    ) {
         return;
     }
 
-    const normalized = normalizeCommandName(name);
+    const normalized =
+        normalizeCommandName(
+            name
+        );
 
     if (!normalized) {
         return;
     }
 
-    COMMANDS.set(normalized, handler);
+    COMMANDS.set(
+        normalized,
+        handler
+    );
 }
 
-function registerCommandAliases(handler, names) {
+
+/* =========================================================
+   REGISTER ALIASES
+========================================================= */
+
+function registerCommandAliases(
+    handler,
+    names
+) {
+
     if (!Array.isArray(names)) {
         names = [names];
     }
 
-    for (const name of names) {
-        registerCommand(name, handler);
+    for (
+        const name
+        of names
+    ) {
+
+        registerCommand(
+            name,
+            handler
+        );
     }
 }
 
-function loadWhatsAppCommands() {
-    const commandsDir = path.join(process.cwd(), 'commands');
 
-    if (!fs.existsSync(commandsDir)) {
+/* =========================================================
+   LOAD WHATSAPP COMMANDS
+========================================================= */
+
+function loadWhatsAppCommands() {
+
+    const commandsDir =
+        path.join(
+            process.cwd(),
+            'commands'
+        );
+
+
+    if (
+        !fs.existsSync(
+            commandsDir
+        )
+    ) {
+
         console.warn(
             '[COMMANDS] commands directory does not exist.'
         );
+
         return;
     }
 
-    const files = fs.readdirSync(commandsDir)
-        .filter((file) => file.endsWith('.js'))
+
+    const files =
+        fs.readdirSync(
+            commandsDir
+        )
+        .filter(
+            (file) =>
+                file.endsWith('.js')
+        )
         .sort();
 
-    for (const file of files) {
-        const fullPath = path.join(commandsDir, file);
+
+    console.log(
+        `[COMMANDS] Found ${files.length} command files.`
+    );
+
+
+    for (
+        const file
+        of files
+    ) {
+
+        const fullPath =
+            path.join(
+                commandsDir,
+                file
+            );
+
 
         try {
-            delete require.cache[require.resolve(fullPath)];
 
-            const commandModule = require(fullPath);
+            /*
+             * Clear require cache so commands are loaded
+             * freshly when the application starts.
+             */
+            delete require.cache[
+                require.resolve(fullPath)
+            ];
 
-            if (typeof commandModule === 'function') {
+
+            const commandModule =
+                require(fullPath);
+
+
+            /* ---------------------------------------------
+               STYLE 1
+
+               module.exports = async ctx => {}
+            --------------------------------------------- */
+
+            if (
+                typeof commandModule ===
+                'function'
+            ) {
+
                 const commandName =
-                    path.basename(file, '.js');
+                    path.basename(
+                        file,
+                        '.js'
+                    );
+
 
                 registerCommand(
                     commandName,
                     commandModule
                 );
 
+
                 console.log(
                     `[COMMANDS] Loaded .${commandName}`
                 );
 
+
                 continue;
             }
 
+
+            /* ---------------------------------------------
+               STYLE 2
+
+               module.exports = {
+                   name: 'menu',
+                   aliases: [],
+                   handler: async ctx => {}
+               }
+            --------------------------------------------- */
+
             if (
                 commandModule &&
-                typeof commandModule.handler === 'function'
+                typeof commandModule.handler ===
+                'function'
             ) {
+
                 const commandName =
                     commandModule.name ||
-                    path.basename(file, '.js');
+                    path.basename(
+                        file,
+                        '.js'
+                    );
+
 
                 registerCommand(
                     commandName,
                     commandModule.handler
                 );
 
-                if (Array.isArray(commandModule.aliases)) {
+
+                if (
+                    Array.isArray(
+                        commandModule.aliases
+                    )
+                ) {
+
                     registerCommandAliases(
                         commandModule.handler,
                         commandModule.aliases
                     );
                 }
 
+
                 console.log(
                     `[COMMANDS] Loaded .${commandName}`
                 );
 
+
                 continue;
             }
+
 
             console.warn(
                 `[COMMANDS] Ignored ${file}: no usable handler.`
             );
+
         } catch (error) {
+
             console.error(
                 `[COMMANDS] Failed loading ${file}:`,
                 error
             );
         }
     }
+
+
+    console.log(
+        `[COMMANDS] Total registered commands: ${COMMANDS.size}`
+    );
 }
 
+
 loadWhatsAppCommands();
+
 
 /* =========================================================
    COMMAND PARSER
 ========================================================= */
 
-function extractCommand(text) {
+function extractCommand(
+    text
+) {
+
     if (!text) {
         return null;
     }
 
-    let value = String(text).trim();
+
+    let value =
+        String(text)
+            .trim();
+
 
     if (!value) {
         return null;
     }
 
-    if (value.startsWith('.')) {
-        value = value.slice(1).trim();
+
+    /*
+     * Commands can be written as:
+     *
+     * .menu
+     *
+     * or:
+     *
+     * menu
+     */
+    if (
+        value.startsWith('.')
+    ) {
+
+        value =
+            value
+                .slice(1)
+                .trim();
     }
+
 
     if (!value) {
         return null;
     }
 
-    const parts = value.split(/\s+/);
 
-    const command = normalizeCommandName(
-        parts.shift()
-    );
+    const parts =
+        value.split(
+            /\s+/
+        );
+
+
+    const command =
+        normalizeCommandName(
+            parts.shift()
+        );
+
 
     if (!command) {
         return null;
     }
 
+
     return {
+
         command,
-        args: parts,
-        raw: text
+
+        args:
+            parts,
+
+        raw:
+            text
     };
 }
+
 
 /* =========================================================
    WHATSAPP COMMAND HANDLER
@@ -220,41 +484,110 @@ async function handleWhatsAppCommand(
     session,
     msg
 ) {
-    const key = String(userId);
 
-    if (!session) {
-        return;
-    }
+    const key =
+        String(userId);
 
-    if (session.stopping) {
-        return;
-    }
 
     /*
-     * Only messages sent by the linked WhatsApp account
-     * itself can control the bot.
+     * Session must exist.
      */
-    if (!isSelfMessage(msg)) {
+    if (!session) {
+
+        console.log(
+            `[COMMAND] No WhatsApp session found for ${key}`
+        );
+
         return;
     }
 
-    const jid = getRemoteJid(msg);
 
-    if (!jid || isIgnoredJid(jid)) {
+    /*
+     * Deliberately stopped sessions cannot execute commands.
+     */
+    if (
+        session.stopping
+    ) {
+
+        console.log(
+            `[COMMAND] Session ${key} is stopping.`
+        );
+
         return;
     }
 
-    const text = getMessageText(msg.message);
 
-    if (!text || !text.trim()) {
+    /*
+     * =====================================================
+     * IMPORTANT SECURITY RULE
+     * =====================================================
+     *
+     * ONLY messages sent by the linked WhatsApp account
+     * can control this bot.
+     *
+     * isSelfMessage() checks message.key.fromMe.
+     */
+    if (
+        !isSelfMessage(msg)
+    ) {
+
+        /*
+         * Silently ignore everybody else's messages.
+         */
         return;
     }
 
-    const parsed = extractCommand(text);
+
+    /*
+     * Get the WhatsApp chat JID.
+     */
+    const jid =
+        getRemoteJid(
+            msg
+        );
+
+
+    if (
+        !jid ||
+        isIgnoredJid(jid)
+    ) {
+
+        return;
+    }
+
+
+    /*
+     * Extract message text.
+     */
+    const text =
+        getMessageText(
+            msg.message
+        );
+
+
+    if (
+        !text ||
+        !text.trim()
+    ) {
+
+        return;
+    }
+
+
+    /*
+     * Parse command.
+     */
+    const parsed =
+        extractCommand(
+            text
+        );
+
 
     if (!parsed) {
+
         return;
     }
+
 
     const {
         command,
@@ -262,120 +595,198 @@ async function handleWhatsAppCommand(
         raw
     } = parsed;
 
-    const handler = COMMANDS.get(command);
+
+    /*
+     * Find registered command.
+     */
+    const handler =
+        COMMANDS.get(
+            command
+        );
+
 
     if (!handler) {
+
         console.log(
-            `[COMMAND] Unknown command .${command} for ${key}`
+            `[COMMAND] Unknown command .${command} from linked account`
         );
+
         return;
     }
+
 
     console.log(
         `[COMMAND] user=${key} command=${command} jid=${jid}`
     );
 
-    /*
-     * Determine group/private context.
-     */
+
+    /* =====================================================
+       GROUP DETECTION
+    ===================================================== */
+
     const isGroup =
         typeof jid === 'string' &&
-        jid.endsWith('@g.us');
+        jid.endsWith(
+            '@g.us'
+        );
 
-    /*
-     * Extract sender information.
-     *
-     * For a self message, the sender is normally the
-     * linked account itself. Fall back to the remote JID.
-     */
+
+    /* =====================================================
+       SENDER INFORMATION
+    ===================================================== */
+
     const senderJid =
         msg?.key?.participant ||
         msg?.participant ||
         msg?.key?.remoteJid ||
         jid;
 
+
     const senderNumber =
-        String(senderJid || '')
-            .split('@')[0]
-            .replace(/\D/g, '');
+        String(
+            senderJid || ''
+        )
+        .split('@')[0]
+        .replace(
+            /\D/g,
+            ''
+        );
+
+
+    /* =====================================================
+       OWNER
+    ===================================================== */
 
     /*
-     * Owner check.
-     *
-     * The linked WhatsApp account is the owner/controller
-     * of this WhatsApp session.
+     * Because we only accept fromMe messages, the linked
+     * WhatsApp account is always treated as the owner.
      */
-    const isOwner = () => true;
+    const isOwner =
+        () => true;
+
+
+    /* =====================================================
+       COMMAND CONTEXT
+    ===================================================== */
 
     const context = {
-        userId: key,
+
+        userId:
+            key,
 
         session,
 
-        socket: session.socket,
-        sock: session.socket,
+        socket:
+            session.socket,
+
+        sock:
+            session.socket,
 
         msg,
 
         jid,
-        remoteJid: jid,
+
+        remoteJid:
+            jid,
 
         senderJid,
+
         senderNumber,
 
         isGroup,
-        isSelf: true,
+
+        isSelf:
+            true,
 
         text,
+
         raw,
 
         command,
+
         args,
 
         isOwner,
 
+
         /*
          * IMPORTANT:
          *
-         * sendReply() expects:
+         * sendReply() is:
          *
          * sendReply(userId, jid, text, options)
          *
-         * Therefore we pass `key`, not `session.socket`.
+         * Therefore we MUST pass `key`.
          */
-        send: async (message, options = {}) => {
-            return sendReply(
-                key,
-                jid,
+        send:
+            async (
                 message,
-                options
-            );
-        },
+                options = {}
+            ) => {
 
-        reply: async (message, options = {}) => {
-            return sendReply(
-                key,
-                jid,
+                return sendReply(
+                    key,
+                    jid,
+                    message,
+                    options
+                );
+            },
+
+
+        /*
+         * ctx.reply() used by commands such as:
+         *
+         * module.exports = async ctx => {
+         *     await ctx.reply('Hello');
+         * }
+         */
+        reply:
+            async (
                 message,
-                options
-            );
-        }
+                options = {}
+            ) => {
+
+                return sendReply(
+                    key,
+                    jid,
+                    message,
+                    options
+                );
+            }
     };
 
+
+    /* =====================================================
+       EXECUTE COMMAND
+    ===================================================== */
+
     try {
-        /*
-         * New-style command:
-         *
-         * handler(context)
-         */
-        if (handler.length <= 1) {
-            return await handler(context);
-        }
 
         /*
-         * Compatibility with older command handlers:
+         * New command style:
          *
-         * handler(sock, msg, args, userId, context)
+         * module.exports = async ctx => {}
+         */
+        if (
+            handler.length <= 1
+        ) {
+
+            return await handler(
+                context
+            );
+        }
+
+
+        /*
+         * Older command style:
+         *
+         * handler(
+         *     sock,
+         *     msg,
+         *     args,
+         *     userId,
+         *     context
+         * )
          */
         return await handler(
             session.socket,
@@ -384,23 +795,29 @@ async function handleWhatsAppCommand(
             key,
             context
         );
+
     } catch (error) {
+
         console.error(
             `[COMMAND] .${command} failed for ${key}:`,
             error
         );
 
+
+        /*
+         * Try to tell the linked account that the command
+         * failed.
+         */
         try {
-            /*
-             * IMPORTANT:
-             * sendReply() expects userId first.
-             */
+
             await sendReply(
                 key,
                 jid,
                 '❌ Command failed. Please try again.'
             );
+
         } catch (replyError) {
+
             console.error(
                 `[COMMAND] Failed sending error reply for ${key}:`,
                 replyError
@@ -409,8 +826,13 @@ async function handleWhatsAppCommand(
     }
 }
 
+
+/*
+ * Make the command handler available to lib/whatsapp.js.
+ */
 global.handleWhatsAppCommand =
     handleWhatsAppCommand;
+
 
 /* =========================================================
    TELEGRAM COMMAND MODULES
@@ -431,348 +853,546 @@ const helpCommand =
 const startCommand =
     require('./telegram/start');
 
-/* =========================================================
-   /START
-========================================================= */
-
-bot.start(async (ctx) => {
-    try {
-        await startCommand(ctx);
-    } catch (error) {
-        console.error(
-            '[TELEGRAM] /start failed:',
-            error
-        );
-
-        await ctx.reply(
-            '❌ Failed to start the bot.'
-        );
-    }
-});
 
 /* =========================================================
-   /PAIR
+   TELEGRAM /START
 ========================================================= */
 
-bot.command('pair', async (ctx) => {
-    try {
-        /*
-         * pair.js exports an object.
-         *
-         * The correct function is:
-         * pairCommand.beginPairing(ctx)
-         */
-        if (
-            !pairCommand ||
-            typeof pairCommand.beginPairing !== 'function'
-        ) {
-            throw new Error(
-                'Pairing module does not export beginPairing().'
+bot.start(
+    async (ctx) => {
+
+        try {
+
+            await startCommand(
+                ctx
+            );
+
+        } catch (error) {
+
+            console.error(
+                '[TELEGRAM] /start failed:',
+                error
+            );
+
+
+            await ctx.reply(
+                '❌ Failed to start the bot.'
             );
         }
-
-        await pairCommand.beginPairing(ctx);
-
-    } catch (error) {
-        console.error(
-            '[TELEGRAM] /pair failed:',
-            error
-        );
-
-        await ctx.reply(
-            '❌ Pairing command failed.\n\n' +
-            'Please try /pair again.'
-        );
     }
-});
+);
+
 
 /* =========================================================
-   /CANCEL
+   TELEGRAM /PAIR
 ========================================================= */
 
-bot.command('cancel', async (ctx) => {
-    try {
-        if (
-            !pairCommand ||
-            typeof pairCommand.cancelPairing !== 'function'
-        ) {
-            throw new Error(
-                'Pairing module does not export cancelPairing().'
+bot.command(
+    'pair',
+    async (ctx) => {
+
+        try {
+
+            if (
+                !pairCommand ||
+                typeof pairCommand.beginPairing !==
+                'function'
+            ) {
+
+                throw new Error(
+                    'Pairing module does not export beginPairing().'
+                );
+            }
+
+
+            await pairCommand.beginPairing(
+                ctx
+            );
+
+        } catch (error) {
+
+            console.error(
+                '[TELEGRAM] /pair failed:',
+                error
+            );
+
+
+            await ctx.reply(
+                '❌ Pairing command failed.\n\n' +
+                'Please try /pair again.'
             );
         }
-
-        await pairCommand.cancelPairing(ctx);
-
-    } catch (error) {
-        console.error(
-            '[TELEGRAM] /cancel failed:',
-            error
-        );
-
-        await ctx.reply(
-            '❌ Failed to cancel the pairing request.'
-        );
     }
-});
+);
+
 
 /* =========================================================
-   /STOP
+   TELEGRAM /CANCEL
 ========================================================= */
 
-bot.command('stop', async (ctx) => {
-    try {
-        await stopCommand(ctx);
-    } catch (error) {
-        console.error(
-            '[TELEGRAM] /stop failed:',
-            error
-        );
+bot.command(
+    'cancel',
+    async (ctx) => {
 
-        await ctx.reply(
-            '⚠️ Stop failed unexpectedly.\n\n' +
-            'A cleanup attempt may still have been performed.'
-        );
+        try {
+
+            if (
+                !pairCommand ||
+                typeof pairCommand.cancelPairing !==
+                'function'
+            ) {
+
+                throw new Error(
+                    'Pairing module does not export cancelPairing().'
+                );
+            }
+
+
+            await pairCommand.cancelPairing(
+                ctx
+            );
+
+        } catch (error) {
+
+            console.error(
+                '[TELEGRAM] /cancel failed:',
+                error
+            );
+
+
+            await ctx.reply(
+                '❌ Failed to cancel the pairing request.'
+            );
+        }
     }
-});
+);
+
 
 /* =========================================================
-   /STATUS
+   TELEGRAM /STOP
 ========================================================= */
 
-bot.command('status', async (ctx) => {
-    try {
-        await statusCommand(ctx);
-    } catch (error) {
-        console.error(
-            '[TELEGRAM] /status failed:',
-            error
-        );
+bot.command(
+    'stop',
+    async (ctx) => {
 
-        await ctx.reply(
-            '❌ Unable to read WhatsApp status.'
-        );
+        try {
+
+            await stopCommand(
+                ctx
+            );
+
+        } catch (error) {
+
+            console.error(
+                '[TELEGRAM] /stop failed:',
+                error
+            );
+
+
+            await ctx.reply(
+                '⚠️ Stop failed unexpectedly.\n\n' +
+                'A cleanup attempt may still have been performed.'
+            );
+        }
     }
-});
+);
+
 
 /* =========================================================
-   /HELP
+   TELEGRAM /STATUS
 ========================================================= */
 
-bot.command('help', async (ctx) => {
-    try {
-        await helpCommand(ctx);
-    } catch (error) {
-        console.error(
-            '[TELEGRAM] /help failed:',
-            error
-        );
+bot.command(
+    'status',
+    async (ctx) => {
 
-        await ctx.reply(
-            '❌ Unable to show help.'
-        );
+        try {
+
+            await statusCommand(
+                ctx
+            );
+
+        } catch (error) {
+
+            console.error(
+                '[TELEGRAM] /status failed:',
+                error
+            );
+
+
+            await ctx.reply(
+                '❌ Unable to read WhatsApp status.'
+            );
+        }
     }
-});
+);
+
+
+/* =========================================================
+   TELEGRAM /HELP
+========================================================= */
+
+bot.command(
+    'help',
+    async (ctx) => {
+
+        try {
+
+            await helpCommand(
+                ctx
+            );
+
+        } catch (error) {
+
+            console.error(
+                '[TELEGRAM] /help failed:',
+                error
+            );
+
+
+            await ctx.reply(
+                '❌ Unable to show help.'
+            );
+        }
+    }
+);
+
 
 /* =========================================================
    TELEGRAM PAIRING NUMBER HANDLER
 ========================================================= */
 
-bot.on('text', async (ctx) => {
-    try {
-        if (!ctx.message?.text) {
-            return;
-        }
+bot.on(
+    'text',
+    async (ctx) => {
 
-        const userId =
-            String(ctx.from.id);
+        try {
 
-        const pairingState =
-            getPairingState(userId);
+            if (
+                !ctx.message?.text
+            ) {
 
-        if (!pairingState) {
-            return;
-        }
+                return;
+            }
 
-        /*
-         * pair.js uses `status`, not `stage`.
-         */
-        if (
-            pairingState.status !==
-            'waiting_number'
-        ) {
-            return;
-        }
 
-        const text =
-            String(ctx.message.text).trim();
+            const userId =
+                String(
+                    ctx.from.id
+                );
 
-        /*
-         * Do not consume Telegram commands here.
-         */
-        if (!text || text.startsWith('/')) {
-            return;
-        }
 
-        if (
-            !pairCommand ||
-            typeof pairCommand.handlePairNumber !==
-            'function'
-        ) {
-            await ctx.reply(
-                '❌ Pairing number handler is unavailable.'
+            const pairingState =
+                getPairingState(
+                    userId
+                );
+
+
+            if (!pairingState) {
+
+                return;
+            }
+
+
+            /*
+             * pair.js uses:
+             *
+             * status: 'waiting_number'
+             */
+            if (
+                pairingState.status !==
+                'waiting_number'
+            ) {
+
+                return;
+            }
+
+
+            const text =
+                String(
+                    ctx.message.text
+                ).trim();
+
+
+            /*
+             * Do not consume Telegram commands.
+             */
+            if (
+                !text ||
+                text.startsWith('/')
+            ) {
+
+                return;
+            }
+
+
+            if (
+                !pairCommand ||
+                typeof pairCommand.handlePairNumber !==
+                'function'
+            ) {
+
+                await ctx.reply(
+                    '❌ Pairing number handler is unavailable.'
+                );
+
+                return;
+            }
+
+
+            /*
+             * handlePairNumber() reads the number from
+             * ctx.message.text.
+             */
+            await pairCommand.handlePairNumber(
+                ctx
             );
-            return;
+
+        } catch (error) {
+
+            console.error(
+                '[TELEGRAM] Pairing number handler failed:',
+                error
+            );
+
+
+            try {
+
+                await ctx.reply(
+                    '❌ I could not process that phone number.'
+                );
+
+            } catch (_) {
+
+                // Ignore Telegram reply failure.
+            }
         }
+    }
+);
 
-        /*
-         * handlePairNumber reads the number from
-         * ctx.message.text.
-         */
-        await pairCommand.handlePairNumber(ctx);
 
-    } catch (error) {
+/* =========================================================
+   TELEGRAM ERROR HANDLER
+========================================================= */
+
+bot.catch(
+    async (
+        error,
+        ctx
+    ) => {
+
         console.error(
-            '[TELEGRAM] Pairing number handler failed:',
+            '[TELEGRAM] Unhandled bot error:',
             error
         );
 
+
         try {
-            await ctx.reply(
-                '❌ I could not process that phone number.'
-            );
-        } catch (_) {
-            // Ignore Telegram reply failure.
-        }
-    }
-});
 
-/* =========================================================
-   TELEGRAM ERROR HANDLING
-========================================================= */
+            if (
+                ctx?.chat?.id
+            ) {
 
-bot.catch(async (error, ctx) => {
-    console.error(
-        '[TELEGRAM] Unhandled bot error:',
-        error
-    );
+                await ctx.telegram.sendMessage(
+                    String(
+                        ctx.chat.id
+                    ),
+                    '⚠️ An unexpected bot error occurred.'
+                );
+            }
 
-    try {
-        if (ctx?.chat?.id) {
-            await ctx.telegram.sendMessage(
-                String(ctx.chat.id),
-                '⚠️ An unexpected bot error occurred.'
+        } catch (replyError) {
+
+            console.error(
+                '[TELEGRAM] Failed sending error message:',
+                replyError
             );
         }
-    } catch (replyError) {
-        console.error(
-            '[TELEGRAM] Failed sending error message:',
-            replyError
-        );
     }
-});
+);
+
 
 /* =========================================================
    STARTUP
 ========================================================= */
 
-let shuttingDown = false;
+let shuttingDown =
+    false;
+
 
 async function startBot() {
+
     console.log('');
-    console.log('========================================');
-    console.log('          SOLVAX MD STARTING');
-    console.log('========================================');
+    console.log(
+        '========================================'
+    );
+    console.log(
+        '          SOLVAX MD STARTING'
+    );
+    console.log(
+        '========================================'
+    );
     console.log('');
+
 
     console.log(
         `[SYSTEM] Node.js: ${process.version}`
     );
 
+
     console.log(
         `[SYSTEM] Loaded WhatsApp commands: ${COMMANDS.size}`
     );
 
+
     /*
-     * Start Telegram first.
+     * Print registered commands so you can verify that
+     * menu/vv/etc. actually loaded.
      */
+    if (
+        COMMANDS.size > 0
+    ) {
+
+        console.log(
+            `[COMMANDS] ${Array.from(COMMANDS.keys())
+                .map((name) => '.' + name)
+                .join(', ')}`
+        );
+    }
+
+
+    /* =====================================================
+       START TELEGRAM
+    ===================================================== */
+
     await bot.launch();
+
 
     console.log(
         '✅ Telegram bot started.'
     );
 
-    /*
-     * Restore authenticated WhatsApp sessions.
-     */
+
+    /* =====================================================
+       RESTORE WHATSAPP SESSIONS
+    ===================================================== */
+
     try {
+
         await restoreSessions();
+
 
         console.log(
             '✅ WhatsApp session restore completed.'
         );
+
     } catch (error) {
+
         console.error(
             '❌ WhatsApp session restore failed:',
             error
         );
     }
 
+
     console.log('');
-    console.log('========================================');
-    console.log('             SOLVAX MD READY');
-    console.log('========================================');
+    console.log(
+        '========================================'
+    );
+    console.log(
+        '             SOLVAX MD READY'
+    );
+    console.log(
+        '========================================'
+    );
     console.log('');
 }
+
 
 /* =========================================================
    SHUTDOWN
 ========================================================= */
 
-async function shutdown(signal) {
-    if (shuttingDown) {
+async function shutdown(
+    signal
+) {
+
+    if (
+        shuttingDown
+    ) {
+
         return;
     }
 
-    shuttingDown = true;
+
+    shuttingDown =
+        true;
+
 
     console.log(
         `\n[SYSTEM] Received ${signal}. Shutting down...`
     );
 
+
     /*
-     * Do not remove WhatsApp authentication on process
-     * shutdown. /stop performs permanent session cleanup.
+     * Do NOT remove WhatsApp authentication during normal
+     * Railway/process shutdown.
      */
     try {
-        await stopAllWhatsAppSessions({
-            removeAuth: false
-        });
+
+        await stopAllWhatsAppSessions(
+            {
+                removeAuth:
+                    false
+            }
+        );
+
 
         console.log(
             '[SYSTEM] WhatsApp sessions stopped.'
         );
+
     } catch (error) {
+
         console.error(
             '[SYSTEM] Failed stopping WhatsApp sessions:',
             error
         );
     }
 
+
+    /* =====================================================
+       STOP TELEGRAM
+    ===================================================== */
+
     try {
-        bot.stop(signal);
+
+        bot.stop(
+            signal
+        );
+
 
         console.log(
             '[SYSTEM] Telegram bot stopped.'
         );
+
     } catch (error) {
+
         console.error(
             '[SYSTEM] Failed stopping Telegram bot:',
             error
         );
     }
 
+
     process.exit(0);
 }
+
+
+/* =========================================================
+   PROCESS SIGNALS
+========================================================= */
 
 process.once(
     'SIGINT',
@@ -784,13 +1404,15 @@ process.once(
     () => shutdown('SIGTERM')
 );
 
+
 /* =========================================================
-   PROCESS ERROR HANDLING
+   UNHANDLED REJECTION
 ========================================================= */
 
 process.on(
     'unhandledRejection',
     (reason) => {
+
         console.error(
             '[SYSTEM] Unhandled promise rejection:',
             reason
@@ -798,9 +1420,15 @@ process.on(
     }
 );
 
+
+/* =========================================================
+   UNCAUGHT EXCEPTION
+========================================================= */
+
 process.on(
     'uncaughtException',
     (error) => {
+
         console.error(
             '[SYSTEM] Uncaught exception:',
             error
@@ -808,15 +1436,20 @@ process.on(
     }
 );
 
+
 /* =========================================================
-   START
+   START APPLICATION
 ========================================================= */
 
-startBot().catch((error) => {
-    console.error(
-        '❌ Failed to start SolvaX MD:',
-        error
-    );
+startBot()
+    .catch(
+        (error) => {
 
-    process.exit(1);
-});
+            console.error(
+                '❌ Failed to start SolvaX MD:',
+                error
+            );
+
+            process.exit(1);
+        }
+    );
