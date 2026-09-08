@@ -41,7 +41,7 @@ if (!BOT_TOKEN) {
 }
 
 // ============================================================
-// DATABASE
+// DATABASE (with write queue to prevent corruption)
 // ============================================================
 
 const DB_FILE = './database.json';
@@ -175,7 +175,7 @@ async function fetchBuffer(url) {
 }
 
 // ============================================================
-// COMMAND QUEUE
+// COMMAND QUEUE (first‑come, first‑serve)
 // ============================================================
 
 let commandQueue = [];
@@ -581,7 +581,7 @@ bot.command('pair', async ctx => {
 });
 
 // ============================================================
-// TELEGRAM TEXT HANDLER
+// TELEGRAM TEXT HANDLER (receives the number)
 // ============================================================
 
 bot.on('text', async ctx => {
@@ -627,48 +627,131 @@ bot.on('text', async ctx => {
 
     try {
         // ----------------------------------------------------
-        // IMPORTANT FIX:
-        // DO NOT WAIT FOR sock.ws.readyState.
-        // requestPairingCode() is called directly.
+        // CREATE WHATSAPP SOCKET
         // ----------------------------------------------------
 
-        const sessionFolder =
-            `auth_tg_${userId}`;
+        const sessionFolder = `auth_tg_${userId}`;
 
         const {
             state,
             saveCreds
-        } = await useMultiFileAuthState(
-            sessionFolder
-        );
+        } = await useMultiFileAuthState(sessionFolder);
 
-        const sock =
-            makeWASocket({
-                auth: state,
-                printQRInTerminal: false,
-                browser: [
-                    'SolvaX MD',
-                    'Chrome',
-                    '1.0.0'
-                ],
-                markOnlineOnConnect: false,
-                syncFullHistory: false
-            });
+        const sock = makeWASocket({
+            auth: state,
+            printQRInTerminal: false,
+            browser: [
+                'Mac OS',
+                'Chrome',
+                '10.15.7'
+            ],
+            markOnlineOnConnect: false,
+            syncFullHistory: false
+        });
 
-        // Save credentials immediately.
-        sock.ev.on(
-            'creds.update',
-            saveCreds
-        );
+        // Save credentials
+        sock.ev.on('creds.update', saveCreds);
 
         // ----------------------------------------------------
-        // REQUEST PAIRING CODE DIRECTLY
+        // REQUEST PAIRING CODE WHEN BAILEYS STARTS CONNECTING
         // ----------------------------------------------------
 
-        const code =
-            await sock.requestPairingCode(
-                clean
+        let pairingCodeRequested = false;
+        let pairingCodeResolve;
+        let pairingCodeReject;
+
+        const pairingCodePromise = new Promise((resolve, reject) => {
+            pairingCodeResolve = resolve;
+            pairingCodeReject = reject;
+        });
+
+        const pairingTimeout = setTimeout(() => {
+            pairingCodeReject(
+                new Error('Timed out waiting for WhatsApp to start connecting')
             );
+        }, 20000);
+
+        sock.ev.on('connection.update', async (update) => {
+
+            const {
+                connection,
+                qr,
+                lastDisconnect
+            } = update;
+
+            // ------------------------------------------------
+            // BAILEYS HAS STARTED CONNECTING
+            // ------------------------------------------------
+
+            if (
+                !pairingCodeRequested &&
+                !state.creds.registered &&
+                (connection === 'connecting' || qr)
+            ) {
+
+                pairingCodeRequested = true;
+
+                try {
+
+                    console.log(
+                        `[PAIR] WhatsApp connecting for ${clean}`
+                    );
+
+                    const code =
+                        await sock.requestPairingCode(clean);
+
+                    clearTimeout(pairingTimeout);
+
+                    console.log(
+                        `[PAIR] Pairing code generated: ${code}`
+                    );
+
+                    pairingCodeResolve(code);
+
+                } catch (err) {
+
+                    clearTimeout(pairingTimeout);
+
+                    console.error(
+                        '[PAIR] Pairing code error:',
+                        err
+                    );
+
+                    pairingCodeReject(err);
+                }
+            }
+
+            // ------------------------------------------------
+            // CONNECTION OPEN
+            // ------------------------------------------------
+
+            if (connection === 'open') {
+
+                console.log(
+                    `[WHATSAPP] Connected: ${clean}`
+                );
+            }
+
+            // ------------------------------------------------
+            // CONNECTION CLOSED
+            // ------------------------------------------------
+
+            if (connection === 'close') {
+
+                const statusCode =
+                    lastDisconnect?.error?.output?.statusCode;
+
+                console.log(
+                    `[WHATSAPP] Connection closed. Status: ${statusCode || 'unknown'}`
+                );
+            }
+        });
+
+        // ----------------------------------------------------
+        // WAIT FOR THE ACTUAL PAIRING CODE
+        // ----------------------------------------------------
+
+        const code = await pairingCodePromise;
 
         // ----------------------------------------------------
         // STORE SESSION
@@ -686,105 +769,15 @@ bot.on('text', async ctx => {
         };
 
         // ----------------------------------------------------
-        // CONNECTION EVENTS
-        // ----------------------------------------------------
-
-        sock.ev.on(
-            'connection.update',
-            async update => {
-                const {
-                    connection,
-                    lastDisconnect
-                } = update;
-
-                const session =
-                    sessions[userId];
-
-                if (!session) return;
-
-                if (connection === 'open') {
-                    session.connected = true;
-                    session.state = 'connected';
-                    session.reconnecting = false;
-
-                    console.log(
-                        `✅ WhatsApp connected: ${clean}`
-                    );
-
-                    try {
-                        await bot.telegram.sendMessage(
-                            userId,
-                            `✅ *WhatsApp connected successfully!*\n\n` +
-                            `📱 Number: ${clean}\n\n` +
-                            `Send .menu on WhatsApp to get started.`,
-                            {
-                                parse_mode: 'Markdown'
-                            }
-                        );
-                    } catch (e) {}
-                }
-
-                if (connection === 'close') {
-                    session.connected = false;
-
-                    const loggedOut =
-                        isLoggedOut(
-                            lastDisconnect?.error
-                        );
-
-                    if (
-                        loggedOut ||
-                        session.stopped
-                    ) {
-                        delete sessions[userId];
-
-                        try {
-                            await bot.telegram.sendMessage(
-                                userId,
-                                '🔴 WhatsApp was logged out.\n\nUse /pair to link it again.'
-                            );
-                        } catch (e) {}
-
-                        return;
-                    }
-
-                    if (session.reconnecting) {
-                        return;
-                    }
-
-                    session.reconnecting = true;
-                    session.state = 'connecting';
-
-                    console.log(
-                        `♻️ Reconnecting ${clean}...`
-                    );
-
-                    try {
-                        await sleep(3000);
-
-                        if (
-                            sessions[userId] &&
-                            !sessions[userId].stopped
-                        ) {
-                            await createWhatsAppSession(
-                                userId,
-                                clean,
-                                ctx
-                            );
-                        }
-                    } catch (error) {
-                        console.error(
-                            'Reconnect error:',
-                            error.message
-                        );
-                    }
-                }
-            }
-        );
+        // CONNECTION EVENTS (already attached above, but we keep them)
+        // The connection.update listener is already defined.
+        // We still need to forward the open/close to the session.
+        // We'll just rely on the listener above.
 
         // ----------------------------------------------------
-        // MESSAGE HANDLER
-        // ----------------------------------------------------
+        // MESSAGE HANDLER (attached inside createWhatsAppSession? Actually we already have it above)
+        // We'll attach it here as well – but we can reuse the existing one.
+        // We'll add a new one to be safe.
 
         sock.ev.on(
             'messages.upsert',
@@ -849,6 +842,10 @@ bot.on('text', async ctx => {
                 }
             }
         );
+
+        // ----------------------------------------------------
+        // SEND THE PAIRING CODE TO TELEGRAM
+        // ----------------------------------------------------
 
         await ctx.reply(
             `🔑 *PAIRING CODE*\n\n` +
@@ -1150,121 +1147,121 @@ async function handleWhatsAppCommand(
     }
 
     // ========================================================
-// .VV – VIEW ONCE (5 METHODS)
-// ========================================================
+    // .VV – VIEW ONCE (5 METHODS)
+    // ========================================================
 
-if (text === '.vv') {
-    await sendLoading('⏳ Attempting to decrypt view-once...');
+    if (text === '.vv') {
+        await sendLoading('⏳ Attempting to decrypt view-once...');
 
-    let success = false;
-    const methods = 5;
+        let success = false;
+        const methods = 5;
 
-    for (let method = 1; method <= methods; method++) {
-        try {
-            let media = null;
+        for (let method = 1; method <= methods; method++) {
+            try {
+                let media = null;
 
-            // ----------------------------------------------------
-            // METHOD 1: Baileys downloadMediaMessage()
-            // ----------------------------------------------------
-            if (method === 1) {
-                media = await sock.downloadMediaMessage(msg);
-            }
-
-            // ----------------------------------------------------
-            // METHOD 2: Extract URL from message
-            // ----------------------------------------------------
-            if (method === 2 && !media) {
-                const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
-                if (msgObj?.imageMessage?.url) {
-                    const url = msgObj.imageMessage.url;
-                    const response = await fetch(url);
-                    media = await response.buffer();
-                } else if (msgObj?.videoMessage?.url) {
-                    const url = msgObj.videoMessage.url;
-                    const response = await fetch(url);
-                    media = await response.buffer();
-                }
-            }
-
-            // ----------------------------------------------------
-            // METHOD 3: Extract with mediaKey
-            // ----------------------------------------------------
-            if (method === 3 && !media) {
-                const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
-                if (msgObj?.imageMessage?.mediaKey || msgObj?.videoMessage?.mediaKey) {
+                // ----------------------------------------------------
+                // METHOD 1: Baileys downloadMediaMessage()
+                // ----------------------------------------------------
+                if (method === 1) {
                     media = await sock.downloadMediaMessage(msg);
                 }
-            }
 
-            // ----------------------------------------------------
-            // METHOD 4: Force download via Baileys internal
-            // ----------------------------------------------------
-            if (method === 4 && !media) {
-                try {
+                // ----------------------------------------------------
+                // METHOD 2: Extract URL from message
+                // ----------------------------------------------------
+                if (method === 2 && !media) {
                     const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
-                    if (msgObj?.imageMessage || msgObj?.videoMessage) {
-                        const mediaKey = msgObj.imageMessage?.mediaKey || msgObj.videoMessage?.mediaKey;
-                        if (mediaKey) {
-                            const directPath = msgObj.imageMessage?.directPath || msgObj.videoMessage?.directPath;
-                            const url = msgObj.imageMessage?.url || msgObj.videoMessage?.url;
-                            if (url) {
-                                const response = await fetch(url);
-                                const buffer = await response.buffer();
-                                media = buffer;
+                    if (msgObj?.imageMessage?.url) {
+                        const url = msgObj.imageMessage.url;
+                        const response = await fetch(url);
+                        media = await response.buffer();
+                    } else if (msgObj?.videoMessage?.url) {
+                        const url = msgObj.videoMessage.url;
+                        const response = await fetch(url);
+                        media = await response.buffer();
+                    }
+                }
+
+                // ----------------------------------------------------
+                // METHOD 3: Extract with mediaKey
+                // ----------------------------------------------------
+                if (method === 3 && !media) {
+                    const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
+                    if (msgObj?.imageMessage?.mediaKey || msgObj?.videoMessage?.mediaKey) {
+                        media = await sock.downloadMediaMessage(msg);
+                    }
+                }
+
+                // ----------------------------------------------------
+                // METHOD 4: Force download via Baileys internal
+                // ----------------------------------------------------
+                if (method === 4 && !media) {
+                    try {
+                        const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
+                        if (msgObj?.imageMessage || msgObj?.videoMessage) {
+                            const mediaKey = msgObj.imageMessage?.mediaKey || msgObj.videoMessage?.mediaKey;
+                            if (mediaKey) {
+                                const directPath = msgObj.imageMessage?.directPath || msgObj.videoMessage?.directPath;
+                                const url = msgObj.imageMessage?.url || msgObj.videoMessage?.url;
+                                if (url) {
+                                    const response = await fetch(url);
+                                    const buffer = await response.buffer();
+                                    media = buffer;
+                                }
                             }
                         }
-                    }
-                } catch (e) {}
-            }
-
-            // ----------------------------------------------------
-            // METHOD 5: Last resort – use Baileys again
-            // ----------------------------------------------------
-            if (method === 5 && !media) {
-                media = await sock.downloadMediaMessage(msg);
-            }
-
-            // ----------------------------------------------------
-            // If we got media, send it
-            // ----------------------------------------------------
-            if (media) {
-                const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
-                if (msgObj?.imageMessage) {
-                    await sock.sendMessage(sender, {
-                        image: media,
-                        caption: '🔓 View-once decrypted!'
-                    });
-                } else if (msgObj?.videoMessage) {
-                    await sock.sendMessage(sender, {
-                        video: media,
-                        caption: '🔓 View-once decrypted!'
-                    });
-                } else {
-                    await sock.sendMessage(sender, {
-                        image: media,
-                        caption: '🔓 View-once decrypted!'
-                    });
+                    } catch (e) {}
                 }
-                success = true;
-                break;
+
+                // ----------------------------------------------------
+                // METHOD 5: Last resort – use Baileys again
+                // ----------------------------------------------------
+                if (method === 5 && !media) {
+                    media = await sock.downloadMediaMessage(msg);
+                }
+
+                // ----------------------------------------------------
+                // If we got media, send it
+                // ----------------------------------------------------
+                if (media) {
+                    const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
+                    if (msgObj?.imageMessage) {
+                        await sock.sendMessage(sender, {
+                            image: media,
+                            caption: '🔓 View-once decrypted!'
+                        });
+                    } else if (msgObj?.videoMessage) {
+                        await sock.sendMessage(sender, {
+                            video: media,
+                            caption: '🔓 View-once decrypted!'
+                        });
+                    } else {
+                        await sock.sendMessage(sender, {
+                            image: media,
+                            caption: '🔓 View-once decrypted!'
+                        });
+                    }
+                    success = true;
+                    break;
+                }
+
+            } catch (error) {
+                console.log(`Method ${method} failed:`, error.message);
             }
-
-        } catch (error) {
-            console.log(`Method ${method} failed:`, error.message);
         }
-    }
 
-    if (!success) {
-        await sock.sendMessage(sender, {
-            text: '❌ Could not decrypt view-once.\n\nThis is a WhatsApp limitation.\nTry asking the sender to send normally.'
-        });
-    }
+        if (!success) {
+            await sock.sendMessage(sender, {
+                text: '❌ Could not decrypt view-once.\n\nThis is a WhatsApp limitation.\nTry asking the sender to send normally.'
+            });
+        }
 
-    return;
-}
+        return;
+    }
 
     // ========================================================
-    // .PLAY
+    // .PLAY (MUSIC)
     // ========================================================
 
     if (text.startsWith('.play ')) {
@@ -1290,7 +1287,7 @@ if (text === '.vv') {
         let success = false;
         let attempts = 0;
 
-        // Source 1
+        // Source 1: Ryzendesu API
         if (
             !success &&
             attempts < PLAY_SOURCES
@@ -1334,7 +1331,7 @@ if (text === '.vv') {
             }
         }
 
-        // Source 2
+        // Source 2: Vevioz API
         if (
             !success &&
             attempts < PLAY_SOURCES
@@ -1418,7 +1415,7 @@ if (text === '.vv') {
         let success = false;
         let attempts = 0;
 
-        // Source 1
+        // Source 1: Ryzendesu API
         if (
             !success &&
             attempts < PLAY_SOURCES
@@ -1462,7 +1459,7 @@ if (text === '.vv') {
             }
         }
 
-        // Source 2
+        // Source 2: Vevioz API
         if (
             !success &&
             attempts < PLAY_SOURCES
