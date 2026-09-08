@@ -1,22 +1,8 @@
-const { jidNumber } = require('../lib/helpers');
-
-module.exports = async (context) => {
-    const { sock, sender, isGroup, sendReply, sendLoading } = context;
-
-    if (!isGroup) {
-        return sendReply({ text: '❌ Group only.' });
-    }
-
-    await sendLoading('⏳ Fetching members...');
-
-    try {
-        const group = await sock.groupMetadata(sender);
-        const mentions = group.participants.map(p => p.id);
-        const message = '📢 Everyone\n\n' + mentions.map(jid => `@${jidNumber(jid)}`).join(' ');
-
-        await sendReply({ text: message, mentions });
-
-    } catch (error) {
-        await sendReply({ text: '⚠️ Could not tag members.' });
-    }
+const { requireAdmin } = require('../lib/group');
+module.exports = async ctx => {
+  const meta = await requireAdmin(ctx);
+  if (!meta) return;
+  const mentions = meta.participants.map(p => p.id);
+  const text = ctx.text || 'Attention everyone';
+  await ctx.sock.sendMessage(ctx.jid, { text: `${text}\n\n${mentions.map(j => `@${j.split('@')[0]}`).join(' ')}`, mentions }, { quoted: ctx.msg });
 };

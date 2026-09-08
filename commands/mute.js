@@ -1,28 +1,9 @@
-module.exports = async (context, action) => {
-    const { sock, sender, isGroup, sendReply, sendLoading, getBotAdminStatus } = context;
-
-    if (!isGroup) {
-        return sendReply({ text: '❌ Group only.' });
-    }
-
-    const botAdmin = await getBotAdminStatus();
-
-    if (!botAdmin) {
-        return sendReply({ text: '❌ Make the bot an admin first.' });
-    }
-
-    const isMuteOn = action === 'on';
-
-    await sendLoading(isMuteOn ? '⏳ Closing chat...' : '⏳ Opening chat...');
-
-    try {
-        await sock.groupSettingUpdate(sender, isMuteOn ? 'announcement' : 'not_announcement');
-        await sendReply({
-            text: isMuteOn
-                ? '🔒 Chat closed. Only admins can send messages.'
-                : '🔓 Chat opened. Everyone can send messages.'
-        });
-    } catch (error) {
-        await sendReply({ text: `❌ Failed: ${error.message}` });
-    }
+const { setGroup, getGroup } = require('../lib/database');
+const { requireAdmin } = require('../lib/group');
+module.exports = async ctx => {
+  const meta = await requireAdmin(ctx);
+  if (!meta) return;
+  const next = !getGroup(ctx.jid).muted;
+  setGroup(ctx.jid, { muted: next });
+  await ctx.reply(next ? '🔇 Bot command mode is now admin-only in this group.' : '🔊 Bot command mode restored for members.');
 };

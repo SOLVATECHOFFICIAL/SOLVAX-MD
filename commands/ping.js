@@ -1,4 +1,6 @@
-module.exports = async (context) => {
-    const { sendReply } = context;
-    await sendReply({ text: '🏓 Pong!\n\nBot is alive.' });
+module.exports = async ctx => {
+  const start = Date.now();
+  await ctx.reply('🏓 Pong!');
+  const ms = Date.now() - start;
+  await ctx.reply(`⚡ Response: ${ms}ms`);
 };

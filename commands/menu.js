@@ -1,38 +1,26 @@
-module.exports = async (context) => {
-    const { sendReply, BOT_NAME, OWNER_NAME } = context;
-    const name = global.BOT_NAME || BOT_NAME || 'SolvaX MD';
-    const owner = global.OWNER_NAME || OWNER_NAME || 'Owner';
+module.exports = async ctx => {
+  await ctx.reply(
+`╭───〔 SOLVAX MD 〕───╮
+│
+│ .ping        Check bot
+│ .menu        Show menu
+│ .sticker     Image → sticker
+│ .play        Search YouTube
+│ .video       Search YouTube
+│ .lyrics      Find lyrics
+│
+│ GROUP TOOLS
+│ .groupinfo
+│ .tagall
+│ .tagadmin
+│ .add
+│ .kick
+│ .promote
+│ .demote
+│ .mute
+│ .anti
+│
+╰────────────────────╯
 
-    const menu =
-`╭┈〔 ✦ ${name} ✦ 〕┈┈┈
-┊ 👑 Owner: ${owner}
-┊ 📚 Teaching Web Devs
-├┈┈┈┈┈┈┈┈┈┈
-┊ 📜 Everyone:
-┊ .menu
-┊ .ping
-┊ .vv
-┊ .play
-┊ .video
-┊ .sticker
-┊ .lyrics
-┊ .groupinfo
-├┈┈┈┈┈┈┈┈┈┈
-┊ 👑 Admin:
-┊ .tagall
-┊ .tagadmin
-┊ .add
-┊ .kick
-┊ .promote
-┊ .demote
-┊ .mute
-├┈┈┈┈┈┈┈┈┈┈
-┊ 🛡️ Anti-System:
-┊ .antilink
-┊ .antimention
-┊ .antiviewonce
-┊ .antibot
-╰┈┈〔 v11 │ SolvaX MD 〕┈┈╯`;
-
-    await sendReply({ text: menu });
+Use .help? No. Humanity has enough help menus already. 😐`);
 };

@@ -1,37 +1,9 @@
-const { jidNumber } = require('../lib/helpers');
-
-module.exports = async (context) => {
-    const { sock, sender, msg, isGroup, sendReply, sendLoading, getGroupAdmins, isOwner } = context;
-
-    if (!isGroup) {
-        return sendReply({ text: '❌ Group only.' });
-    }
-
-    const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-
-    if (!mentioned.length) {
-        return sendReply({ text: '❌ Tag the person to remove.' });
-    }
-
-    const target = mentioned[0];
-    const targetNumber = jidNumber(target);
-
-    if (targetNumber === global.OWNER_NUMBER || global.CO_OWNERS.includes(targetNumber)) {
-        return sendReply({ text: '❌ Cannot remove the owner.' });
-    }
-
-    const admins = await getGroupAdmins();
-
-    if (admins.some(jid => jidNumber(jid) === targetNumber)) {
-        return sendReply({ text: '❌ Cannot remove an admin.' });
-    }
-
-    await sendLoading('⏳ Removing user...');
-
-    try {
-        await sock.groupParticipantsUpdate(sender, [target], 'remove');
-        await sendReply({ text: '✅ User removed.' });
-    } catch (error) {
-        await sendReply({ text: `❌ Failed: ${error.message}` });
-    }
+const { requireAdmin } = require('../lib/group');
+module.exports = async ctx => {
+  const meta = await requireAdmin(ctx);
+  if (!meta) return;
+  const target = ctx.msg.message?.extendedTextMessage?.contextInfo?.participant || (ctx.args[0] ? `${ctx.args[0].replace(/\D/g,'')}@s.whatsapp.net` : null);
+  if (!target) return ctx.reply('Reply to a member or use .kick 234xxxxxxxxxx');
+  try { await ctx.sock.groupParticipantsUpdate(ctx.jid, [target], 'remove'); await ctx.reply('✅ Member removed.'); }
+  catch (e) { await ctx.reply(`❌ Could not remove member: ${e.message}`); }
 };

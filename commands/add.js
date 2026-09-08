@@ -1,26 +1,10 @@
-const { cleanNumber } = require('../lib/helpers');
-
-module.exports = async (context) => {
-    const { sock, sender, rawText, isGroup, sendReply, sendLoading } = context;
-
-    if (!isGroup) {
-        return sendReply({ text: '❌ Group only.' });
-    }
-
-    const number = cleanNumber(rawText.slice(5));
-
-    if (!number) {
-        return sendReply({ text: '❌ Usage: .add 2349012345678' });
-    }
-
-    const target = `${number}@s.whatsapp.net`;
-
-    await sendLoading(`⏳ Adding ${number}...`);
-
-    try {
-        await sock.groupParticipantsUpdate(sender, [target], 'add');
-        await sendReply({ text: `✅ ${number} processed.` });
-    } catch (error) {
-        await sendReply({ text: `❌ Failed: ${error.message}` });
-    }
+const { cleanNumber, toJid } = require('../lib/helpers');
+const { requireAdmin } = require('../lib/group');
+module.exports = async ctx => {
+  const meta = await requireAdmin(ctx);
+  if (!meta) return;
+  const clean = cleanNumber(ctx.args[0]);
+  if (clean.length < 10 || clean.length > 15) return ctx.reply('Usage: .add 2349012345678');
+  try { await ctx.sock.groupParticipantsUpdate(ctx.jid, [toJid(clean)], 'add'); await ctx.reply(`✅ Add request sent for ${clean}.`); }
+  catch (e) { await ctx.reply(`❌ Could not add: ${e.message}`); }
 };
