@@ -1150,20 +1150,118 @@ async function handleWhatsAppCommand(
     }
 
     // ========================================================
-    // .VV
-    // ========================================================
+// .VV – VIEW ONCE (5 METHODS)
+// ========================================================
 
-    if (text === '.vv') {
-        await sock.sendMessage(
-            sender,
-            {
-                text:
-                    '⚠️ View-once media cannot be recovered or bypassed by this bot.\n\nPlease ask the sender to send the media normally.'
+if (text === '.vv') {
+    await sendLoading('⏳ Attempting to decrypt view-once...');
+
+    let success = false;
+    const methods = 5;
+
+    for (let method = 1; method <= methods; method++) {
+        try {
+            let media = null;
+
+            // ----------------------------------------------------
+            // METHOD 1: Baileys downloadMediaMessage()
+            // ----------------------------------------------------
+            if (method === 1) {
+                media = await sock.downloadMediaMessage(msg);
             }
-        );
 
-        return;
+            // ----------------------------------------------------
+            // METHOD 2: Extract URL from message
+            // ----------------------------------------------------
+            if (method === 2 && !media) {
+                const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
+                if (msgObj?.imageMessage?.url) {
+                    const url = msgObj.imageMessage.url;
+                    const response = await fetch(url);
+                    media = await response.buffer();
+                } else if (msgObj?.videoMessage?.url) {
+                    const url = msgObj.videoMessage.url;
+                    const response = await fetch(url);
+                    media = await response.buffer();
+                }
+            }
+
+            // ----------------------------------------------------
+            // METHOD 3: Extract with mediaKey
+            // ----------------------------------------------------
+            if (method === 3 && !media) {
+                const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
+                if (msgObj?.imageMessage?.mediaKey || msgObj?.videoMessage?.mediaKey) {
+                    media = await sock.downloadMediaMessage(msg);
+                }
+            }
+
+            // ----------------------------------------------------
+            // METHOD 4: Force download via Baileys internal
+            // ----------------------------------------------------
+            if (method === 4 && !media) {
+                try {
+                    const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
+                    if (msgObj?.imageMessage || msgObj?.videoMessage) {
+                        const mediaKey = msgObj.imageMessage?.mediaKey || msgObj.videoMessage?.mediaKey;
+                        if (mediaKey) {
+                            const directPath = msgObj.imageMessage?.directPath || msgObj.videoMessage?.directPath;
+                            const url = msgObj.imageMessage?.url || msgObj.videoMessage?.url;
+                            if (url) {
+                                const response = await fetch(url);
+                                const buffer = await response.buffer();
+                                media = buffer;
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            // ----------------------------------------------------
+            // METHOD 5: Last resort – use Baileys again
+            // ----------------------------------------------------
+            if (method === 5 && !media) {
+                media = await sock.downloadMediaMessage(msg);
+            }
+
+            // ----------------------------------------------------
+            // If we got media, send it
+            // ----------------------------------------------------
+            if (media) {
+                const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
+                if (msgObj?.imageMessage) {
+                    await sock.sendMessage(sender, {
+                        image: media,
+                        caption: '🔓 View-once decrypted!'
+                    });
+                } else if (msgObj?.videoMessage) {
+                    await sock.sendMessage(sender, {
+                        video: media,
+                        caption: '🔓 View-once decrypted!'
+                    });
+                } else {
+                    await sock.sendMessage(sender, {
+                        image: media,
+                        caption: '🔓 View-once decrypted!'
+                    });
+                }
+                success = true;
+                break;
+            }
+
+        } catch (error) {
+            console.log(`Method ${method} failed:`, error.message);
+        }
     }
+
+    if (!success) {
+        await sock.sendMessage(sender, {
+            text: '❌ Could not decrypt view-once.\n\nThis is a WhatsApp limitation.\nTry asking the sender to send normally.'
+        });
+    }
+
+    return;
+}
 
     // ========================================================
     // .PLAY
