@@ -17,7 +17,6 @@ const {
     getPairingState
 } = require('./lib/whatsapp');
 
-
 const configPath = path.join(process.cwd(), 'config.json');
 
 let config = {};
@@ -36,7 +35,6 @@ const BOT_TOKEN =
     process.env.TELEGRAM_BOT_TOKEN ||
     config.botToken ||
     config.telegramBotToken ||
-    config.telegramToken ||
     '';
 
 if (!BOT_TOKEN) {
@@ -55,6 +53,10 @@ global.sessions = global.sessions || {};
 global.pairingStates = global.pairingStates || {};
 
 const COMMANDS = new Map();
+
+/* =========================================================
+   COMMAND REGISTRATION
+========================================================= */
 
 function normalizeCommandName(name) {
     if (!name) return '';
@@ -113,15 +115,18 @@ function loadWhatsAppCommands() {
             const commandModule = require(fullPath);
 
             if (typeof commandModule === 'function') {
-                const commandName = path.basename(file, '.js');
+                const commandName =
+                    path.basename(file, '.js');
 
-                registerCommand(commandName, commandModule);
+                registerCommand(
+                    commandName,
+                    commandModule
+                );
 
-                if (Array.isArray(commandModule.aliases)) {
-                    registerCommandAliases(commandModule, commandModule.aliases);
-                }
+                console.log(
+                    `[COMMANDS] Loaded .${commandName}`
+                );
 
-                console.log(`[COMMANDS] Loaded .${commandName}`);
                 continue;
             }
 
@@ -166,6 +171,10 @@ function loadWhatsAppCommands() {
 
 loadWhatsAppCommands();
 
+/* =========================================================
+   COMMAND PARSER
+========================================================= */
+
 function extractCommand(text) {
     if (!text) {
         return null;
@@ -177,16 +186,9 @@ function extractCommand(text) {
         return null;
     }
 
-    /*
-     * WhatsApp commands use the configured dot prefix.
-     * Requiring the prefix prevents ordinary conversation from
-     * being interpreted as a command and makes .mute enforceable.
-     */
-    if (!value.startsWith('.')) {
-        return null;
+    if (value.startsWith('.')) {
+        value = value.slice(1).trim();
     }
-
-    value = value.slice(1).trim();
 
     if (!value) {
         return null;
@@ -194,7 +196,9 @@ function extractCommand(text) {
 
     const parts = value.split(/\s+/);
 
-    const command = normalizeCommandName(parts.shift());
+    const command = normalizeCommandName(
+        parts.shift()
+    );
 
     if (!command) {
         return null;
@@ -206,6 +210,10 @@ function extractCommand(text) {
         raw: text
     };
 }
+
+/* =========================================================
+   WHATSAPP COMMAND HANDLER
+========================================================= */
 
 async function handleWhatsAppCommand(
     userId,
@@ -223,20 +231,16 @@ async function handleWhatsAppCommand(
     }
 
     /*
-     * SECURITY RULE:
-     *
-     * Private chats are controlled only by the linked account.
-     * Group chats may use normal commands; admin-only commands
-     * perform their own group permission checks.
+     * Only messages sent by the linked WhatsApp account
+     * itself can control the bot.
      */
+    if (!isSelfMessage(msg)) {
+        return;
+    }
 
     const jid = getRemoteJid(msg);
 
     if (!jid || isIgnoredJid(jid)) {
-        return;
-    }
-
-    if (!jid.endsWith('@g.us') && !isSelfMessage(msg)) {
         return;
     }
 
@@ -269,32 +273,42 @@ async function handleWhatsAppCommand(
     );
 
     /*
-     * Command context.
-     *
-     * Every command gets the exact WhatsApp JID where
-     * the command was sent.
-     *
-     * Therefore:
-     *
-     * Private chat  -> reply to that private chat
-     * Group         -> reply inside that same group
-     *
-     * We do NOT reply to the Telegram user here.
+     * Determine group/private context.
      */
+    const isGroup =
+        typeof jid === 'string' &&
+        jid.endsWith('@g.us');
 
-    const ownJid = session.socket?.user?.id || '';
+    /*
+     * Extract sender information.
+     *
+     * For a self message, the sender is normally the
+     * linked account itself. Fall back to the remote JID.
+     */
     const senderJid =
-        msg.key?.participant ||
-        (msg.key?.fromMe ? ownJid : jid);
+        msg?.key?.participant ||
+        msg?.participant ||
+        msg?.key?.remoteJid ||
+        jid;
 
-    const senderNumber = String(senderJid || '')
-        .split('@')[0]
-        .split(':')[0]
-        .replace(/\D/g, '');
+    const senderNumber =
+        String(senderJid || '')
+            .split('@')[0]
+            .replace(/\D/g, '');
+
+    /*
+     * Owner check.
+     *
+     * The linked WhatsApp account is the owner/controller
+     * of this WhatsApp session.
+     */
+    const isOwner = () => true;
 
     const context = {
         userId: key,
+
         session,
+
         socket: session.socket,
         sock: session.socket,
 
@@ -302,23 +316,24 @@ async function handleWhatsAppCommand(
 
         jid,
         remoteJid: jid,
+
         senderJid,
         senderNumber,
-        isGroup: jid.endsWith('@g.us'),
-        isSelf: isSelfMessage(msg),
-        isOwner: () => isSelfMessage(msg),
 
-        // Command arguments only, not the command itself.
-        text: args.join(' '),
-        rawText: text,
+        isGroup,
+        isSelf: true,
+
+        text,
         raw,
 
         command,
         args,
 
+        isOwner,
+
         send: async (message, options = {}) => {
             return sendReply(
-                key,
+                session.socket,
                 jid,
                 message,
                 options
@@ -327,7 +342,7 @@ async function handleWhatsAppCommand(
 
         reply: async (message, options = {}) => {
             return sendReply(
-                key,
+                session.socket,
                 jid,
                 message,
                 options
@@ -339,22 +354,17 @@ async function handleWhatsAppCommand(
         /*
          * New-style command:
          *
-         * module(context)
+         * handler(context)
          */
-
         if (handler.length <= 1) {
             return await handler(context);
         }
 
         /*
-         * Compatibility with older command files that may expect:
+         * Compatibility with older command handlers:
          *
-         * handler(sock, msg, args, userId)
-         *
-         * This prevents old command files from silently breaking
-         * after the new session architecture.
+         * handler(sock, msg, args, userId, context)
          */
-
         return await handler(
             session.socket,
             msg,
@@ -368,14 +378,9 @@ async function handleWhatsAppCommand(
             error
         );
 
-        /*
-         * Do not expose internal errors to group members.
-         * A short error is enough.
-         */
-
         try {
             await sendReply(
-                key,
+                session.socket,
                 jid,
                 '❌ Command failed. Please try again.'
             );
@@ -391,11 +396,9 @@ async function handleWhatsAppCommand(
 global.handleWhatsAppCommand =
     handleWhatsAppCommand;
 
-/*
- * ---------------------------------------------------------
- * TELEGRAM COMMANDS
- * ---------------------------------------------------------
- */
+/* =========================================================
+   TELEGRAM COMMAND MODULES
+========================================================= */
 
 const pairCommand =
     require('./telegram/pair');
@@ -412,11 +415,18 @@ const helpCommand =
 const startCommand =
     require('./telegram/start');
 
+/* =========================================================
+   /START
+========================================================= */
+
 bot.start(async (ctx) => {
     try {
         await startCommand(ctx);
     } catch (error) {
-        console.error('[TELEGRAM] /start failed:', error);
+        console.error(
+            '[TELEGRAM] /start failed:',
+            error
+        );
 
         await ctx.reply(
             '❌ Failed to start the bot.'
@@ -424,33 +434,83 @@ bot.start(async (ctx) => {
     }
 });
 
+/* =========================================================
+   /PAIR
+========================================================= */
+
 bot.command('pair', async (ctx) => {
     try {
-        await pairCommand(ctx);
+        /*
+         * pair.js exports an object.
+         *
+         * The correct function is:
+         * pairCommand.beginPairing(ctx)
+         */
+        if (
+            !pairCommand ||
+            typeof pairCommand.beginPairing !== 'function'
+        ) {
+            throw new Error(
+                'Pairing module does not export beginPairing().'
+            );
+        }
+
+        await pairCommand.beginPairing(ctx);
+
     } catch (error) {
-        console.error('[TELEGRAM] /pair failed:', error);
+        console.error(
+            '[TELEGRAM] /pair failed:',
+            error
+        );
 
         await ctx.reply(
             '❌ Pairing command failed.\n\n' +
-            'Use /stop and then /pair again.'
+            'Please try /pair again.'
         );
     }
 });
 
+/* =========================================================
+   /CANCEL
+========================================================= */
+
 bot.command('cancel', async (ctx) => {
     try {
+        if (
+            !pairCommand ||
+            typeof pairCommand.cancelPairing !== 'function'
+        ) {
+            throw new Error(
+                'Pairing module does not export cancelPairing().'
+            );
+        }
+
         await pairCommand.cancelPairing(ctx);
+
     } catch (error) {
-        console.error('[TELEGRAM] /cancel failed:', error);
-        await ctx.reply('❌ Unable to cancel the current pairing request.');
+        console.error(
+            '[TELEGRAM] /cancel failed:',
+            error
+        );
+
+        await ctx.reply(
+            '❌ Failed to cancel the pairing request.'
+        );
     }
 });
+
+/* =========================================================
+   /STOP
+========================================================= */
 
 bot.command('stop', async (ctx) => {
     try {
         await stopCommand(ctx);
     } catch (error) {
-        console.error('[TELEGRAM] /stop failed:', error);
+        console.error(
+            '[TELEGRAM] /stop failed:',
+            error
+        );
 
         await ctx.reply(
             '⚠️ Stop failed unexpectedly.\n\n' +
@@ -459,11 +519,18 @@ bot.command('stop', async (ctx) => {
     }
 });
 
+/* =========================================================
+   /STATUS
+========================================================= */
+
 bot.command('status', async (ctx) => {
     try {
         await statusCommand(ctx);
     } catch (error) {
-        console.error('[TELEGRAM] /status failed:', error);
+        console.error(
+            '[TELEGRAM] /status failed:',
+            error
+        );
 
         await ctx.reply(
             '❌ Unable to read WhatsApp status.'
@@ -471,11 +538,18 @@ bot.command('status', async (ctx) => {
     }
 });
 
+/* =========================================================
+   /HELP
+========================================================= */
+
 bot.command('help', async (ctx) => {
     try {
         await helpCommand(ctx);
     } catch (error) {
-        console.error('[TELEGRAM] /help failed:', error);
+        console.error(
+            '[TELEGRAM] /help failed:',
+            error
+        );
 
         await ctx.reply(
             '❌ Unable to show help.'
@@ -483,16 +557,9 @@ bot.command('help', async (ctx) => {
     }
 });
 
-/*
- * ---------------------------------------------------------
- * TELEGRAM PAIRING NUMBER HANDLER
- * ---------------------------------------------------------
- *
- * When /pair is active, the next plain Telegram message
- * containing the phone number is handled by pair.js.
- *
- * Outside pairing mode, normal Telegram messages are ignored.
- */
+/* =========================================================
+   TELEGRAM PAIRING NUMBER HANDLER
+========================================================= */
 
 bot.on('text', async (ctx) => {
     try {
@@ -510,28 +577,28 @@ bot.on('text', async (ctx) => {
             return;
         }
 
+        /*
+         * pair.js uses `status`, not `stage`.
+         */
         if (
-            pairingState.stage !==
+            pairingState.status !==
             'waiting_number'
         ) {
             return;
         }
 
-        /*
-         * Ignore Telegram commands here.
-         *
-         * /stop and /pair must remain handled by their
-         * own command handlers.
-         */
-
         const text =
             String(ctx.message.text).trim();
 
+        /*
+         * Do not consume Telegram commands here.
+         */
         if (!text || text.startsWith('/')) {
             return;
         }
 
         if (
+            !pairCommand ||
             typeof pairCommand.handlePairNumber !==
             'function'
         ) {
@@ -541,10 +608,12 @@ bot.on('text', async (ctx) => {
             return;
         }
 
-        await pairCommand.handlePairNumber(
-            ctx,
-            text
-        );
+        /*
+         * handlePairNumber reads the number from
+         * ctx.message.text.
+         */
+        await pairCommand.handlePairNumber(ctx);
+
     } catch (error) {
         console.error(
             '[TELEGRAM] Pairing number handler failed:',
@@ -561,11 +630,9 @@ bot.on('text', async (ctx) => {
     }
 });
 
-/*
- * ---------------------------------------------------------
- * TELEGRAM ERROR HANDLING
- * ---------------------------------------------------------
- */
+/* =========================================================
+   TELEGRAM ERROR HANDLING
+========================================================= */
 
 bot.catch(async (error, ctx) => {
     console.error(
@@ -588,11 +655,9 @@ bot.catch(async (error, ctx) => {
     }
 });
 
-/*
- * ---------------------------------------------------------
- * STARTUP
- * ---------------------------------------------------------
- */
+/* =========================================================
+   STARTUP
+========================================================= */
 
 let shuttingDown = false;
 
@@ -612,12 +677,8 @@ async function startBot() {
     );
 
     /*
-     * Telegram must start before restoring WhatsApp sessions.
-     *
-     * This is important because a restored WhatsApp session can
-     * immediately become "open" and send a Telegram notification.
+     * Start Telegram first.
      */
-
     await bot.launch();
 
     console.log(
@@ -625,12 +686,8 @@ async function startBot() {
     );
 
     /*
-     * Restore previously authenticated WhatsApp sessions.
-     *
-     * Auth is intentionally preserved across a normal process
-     * restart. /stop uses completelyResetUser(), which deletes it.
+     * Restore authenticated WhatsApp sessions.
      */
-
     try {
         await restoreSessions();
 
@@ -651,6 +708,10 @@ async function startBot() {
     console.log('');
 }
 
+/* =========================================================
+   SHUTDOWN
+========================================================= */
+
 async function shutdown(signal) {
     if (shuttingDown) {
         return;
@@ -663,20 +724,12 @@ async function shutdown(signal) {
     );
 
     /*
-     * IMPORTANT:
-     *
-     * removeAuth:false
-     *
-     * A server restart must NOT destroy authenticated WhatsApp
-     * sessions. Otherwise Railway restarts would force users
-     * to pair every time.
-     *
-     * /stop is different and performs a complete deletion.
+     * Do not remove WhatsApp authentication on process
+     * shutdown. /stop performs permanent session cleanup.
      */
-
     try {
         await stopAllWhatsAppSessions({
-            deleteAuth: false
+            removeAuth: false
         });
 
         console.log(
@@ -715,6 +768,10 @@ process.once(
     () => shutdown('SIGTERM')
 );
 
+/* =========================================================
+   PROCESS ERROR HANDLING
+========================================================= */
+
 process.on(
     'unhandledRejection',
     (reason) => {
@@ -734,6 +791,10 @@ process.on(
         );
     }
 );
+
+/* =========================================================
+   START
+========================================================= */
 
 startBot().catch((error) => {
     console.error(
