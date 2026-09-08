@@ -1,2 +1,46 @@
 'use strict';
-module.exports={name:'menu',async run(ctx){await ctx.textReply(`╭───〔 SOLVAX MD 〕───╮\n│ .ping — Bot speed\n│ .menu — Command menu\n│ .groupinfo — Group info\n│ .sticker — Image → sticker\n│ .play — YouTube search\n│ .video — YouTube search\n│ .lyrics — Music search\n│ .vv — View-once media notice\n│\n│ GROUP TOOLS\n│ .tagall [text]\n│ .tagadmin\n│ .add 234xxx\n│ .kick @tag\n│ .promote @tag\n│ .demote @tag\n│ .mute on/off\n│\n│ ANTI\n│ .antilink  .antimention\n│ .antiviewonce  .antibot\n╰──────────────────────╯`);}};
+
+module.exports = async (context) => {
+    // Destructure needed properties from context
+    const { sendReply, isGroup, senderNumber, BOT_NAME, OWNER_NAME } = context;
+
+    // Use global config if available, otherwise fallback to context or hardcoded
+    const botName = global.BOT_NAME || BOT_NAME || 'SolvaX MD';
+    const ownerName = global.OWNER_NAME || OWNER_NAME || 'Solomon';
+
+    // Build the menu text
+    const menu =
+`╭┈〔 ✦ ${botName} ✦ 〕┈┈┈
+┊ 👑 Owner: ${ownerName}
+┊ 📚 Teaching Web Devs
+├┈┈┈┈┈┈┈┈┈┈
+┊ 📜 *Everyone*:
+┊ .menu
+┊ .ping
+┊ .vv
+┊ .play [song]
+┊ .video [song]
+┊ .sticker
+┊ .lyrics [artist - song]
+┊ .groupinfo
+├┈┈┈┈┈┈┈┈┈┈
+┊ 👑 *Admin*:
+┊ .tagall
+┊ .tagadmin
+┊ .add [number]
+┊ .kick @tag
+┊ .promote @tag
+┊ .demote @tag
+┊ .mute on / off
+┊ .lock / .unlock
+├┈┈┈┈┈┈┈┈┈┈
+┊ 🛡️ *Anti-System*:
+┊ .antilink
+┊ .antimention
+┊ .antiviewonce
+┊ .antibot
+╰┈┈〔 v11 │ SolvaX MD 〕┈┈╯`;
+
+    // Send the menu (the router already handles private/public replies)
+    await sendReply({ text: menu });
+};
