@@ -2,7 +2,7 @@
   "botName": "SolvaX MD",
   "prefix": ".",
   "ownerIds": [],
-  "maxPairingSeconds": 120,
+  "maxPairingSeconds": 300,
   "commandCooldownMs": 700,
   "youtubeResults": 5,
   "telegramToken": ""

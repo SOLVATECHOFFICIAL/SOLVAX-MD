@@ -13,12 +13,10 @@ const {
     sendReply,
     restoreSessions,
     stopAllWhatsAppSessions,
-    isWhatsAppConnected
-} = require('./lib/whatsapp');
-
-const {
+    isWhatsAppConnected,
     getPairingState
 } = require('./lib/whatsapp');
+
 
 const configPath = path.join(process.cwd(), 'config.json');
 
@@ -38,6 +36,7 @@ const BOT_TOKEN =
     process.env.TELEGRAM_BOT_TOKEN ||
     config.botToken ||
     config.telegramBotToken ||
+    config.telegramToken ||
     '';
 
 if (!BOT_TOKEN) {
@@ -114,18 +113,15 @@ function loadWhatsAppCommands() {
             const commandModule = require(fullPath);
 
             if (typeof commandModule === 'function') {
-                const commandName =
-                    path.basename(file, '.js');
+                const commandName = path.basename(file, '.js');
 
-                registerCommand(
-                    commandName,
-                    commandModule
-                );
+                registerCommand(commandName, commandModule);
 
-                console.log(
-                    `[COMMANDS] Loaded .${commandName}`
-                );
+                if (Array.isArray(commandModule.aliases)) {
+                    registerCommandAliases(commandModule, commandModule.aliases);
+                }
 
+                console.log(`[COMMANDS] Loaded .${commandName}`);
                 continue;
             }
 
@@ -182,19 +178,15 @@ function extractCommand(text) {
     }
 
     /*
-     * Supports:
-     *
-     * .menu
-     * menu
-     * .menu hello
-     * menu hello
-     *
-     * The bot only executes a recognized command.
+     * WhatsApp commands use the configured dot prefix.
+     * Requiring the prefix prevents ordinary conversation from
+     * being interpreted as a command and makes .mute enforceable.
      */
-
-    if (value.startsWith('.')) {
-        value = value.slice(1).trim();
+    if (!value.startsWith('.')) {
+        return null;
     }
+
+    value = value.slice(1).trim();
 
     if (!value) {
         return null;
@@ -233,19 +225,18 @@ async function handleWhatsAppCommand(
     /*
      * SECURITY RULE:
      *
-     * Only messages sent by the linked WhatsApp account
-     * itself are allowed to control the bot.
-     *
-     * Messages from other people are ignored completely.
+     * Private chats are controlled only by the linked account.
+     * Group chats may use normal commands; admin-only commands
+     * perform their own group permission checks.
      */
-
-    if (!isSelfMessage(msg)) {
-        return;
-    }
 
     const jid = getRemoteJid(msg);
 
     if (!jid || isIgnoredJid(jid)) {
+        return;
+    }
+
+    if (!jid.endsWith('@g.us') && !isSelfMessage(msg)) {
         return;
     }
 
@@ -291,6 +282,16 @@ async function handleWhatsAppCommand(
      * We do NOT reply to the Telegram user here.
      */
 
+    const ownJid = session.socket?.user?.id || '';
+    const senderJid =
+        msg.key?.participant ||
+        (msg.key?.fromMe ? ownJid : jid);
+
+    const senderNumber = String(senderJid || '')
+        .split('@')[0]
+        .split(':')[0]
+        .replace(/\D/g, '');
+
     const context = {
         userId: key,
         session,
@@ -301,8 +302,15 @@ async function handleWhatsAppCommand(
 
         jid,
         remoteJid: jid,
+        senderJid,
+        senderNumber,
+        isGroup: jid.endsWith('@g.us'),
+        isSelf: isSelfMessage(msg),
+        isOwner: () => isSelfMessage(msg),
 
-        text,
+        // Command arguments only, not the command itself.
+        text: args.join(' '),
+        rawText: text,
         raw,
 
         command,
@@ -310,7 +318,7 @@ async function handleWhatsAppCommand(
 
         send: async (message, options = {}) => {
             return sendReply(
-                session.socket,
+                key,
                 jid,
                 message,
                 options
@@ -319,7 +327,7 @@ async function handleWhatsAppCommand(
 
         reply: async (message, options = {}) => {
             return sendReply(
-                session.socket,
+                key,
                 jid,
                 message,
                 options
@@ -367,7 +375,7 @@ async function handleWhatsAppCommand(
 
         try {
             await sendReply(
-                session.socket,
+                key,
                 jid,
                 '❌ Command failed. Please try again.'
             );
@@ -426,6 +434,15 @@ bot.command('pair', async (ctx) => {
             '❌ Pairing command failed.\n\n' +
             'Use /stop and then /pair again.'
         );
+    }
+});
+
+bot.command('cancel', async (ctx) => {
+    try {
+        await pairCommand.cancelPairing(ctx);
+    } catch (error) {
+        console.error('[TELEGRAM] /cancel failed:', error);
+        await ctx.reply('❌ Unable to cancel the current pairing request.');
     }
 });
 
@@ -659,7 +676,7 @@ async function shutdown(signal) {
 
     try {
         await stopAllWhatsAppSessions({
-            removeAuth: false
+            deleteAuth: false
         });
 
         console.log(
