@@ -73,25 +73,29 @@ async function handlePairText(ctx) {
 
         sock.ev.on('creds.update', saveCreds);
 
-        let code;
-        await sleep(1500);
+        let code = null;
+        let attempts = 0;
+        const maxAttempts = 3;
 
-        try {
-            code = await sock.requestPairingCode(clean);
-            console.log(`[PAIR] Code generated: ${code}`);
-        } catch (err) {
-            console.log('[PAIR] First attempt failed, retrying...', err.message);
-            await sleep(2000);
+        while (attempts < maxAttempts && !code) {
+            attempts++;
             try {
+                // Wait longer between attempts
+                await sleep(5000 * attempts);
+                console.log(`[PAIR] Attempt ${attempts} requesting code for ${clean}...`);
                 code = await sock.requestPairingCode(clean);
-                console.log(`[PAIR] Code generated on retry: ${code}`);
-            } catch (err2) {
-                console.error('[PAIR] Both attempts failed:', err2);
-                throw new Error('Could not get pairing code after two attempts.');
+                console.log(`[PAIR] Code generated: ${code}`);
+            } catch (err) {
+                console.log(`[PAIR] Attempt ${attempts} failed:`, err.message);
+                if (attempts >= maxAttempts) {
+                    throw new Error('Could not get pairing code after multiple attempts.');
+                }
             }
         }
 
-        if (!code) throw new Error('No pairing code received.');
+        if (!code) {
+            throw new Error('No pairing code received.');
+        }
 
         sessions[userId] = {
             sock,
@@ -104,7 +108,7 @@ async function handlePairText(ctx) {
             stopped: false
         };
 
-        // Attach connection and message handlers (reuse from whatsapp.js)
+        // Attach connection and message handlers
         const { isLoggedOut } = require('../lib/helpers');
 
         sock.ev.on('connection.update', async update => {
