@@ -1,6 +1,7 @@
-'use strict';
-
-const { cleanNumber } = require('../lib/helpers');
+const {
+    cleanNumber,
+    sleep
+} = require('../lib/helpers');
 
 const {
     createWhatsAppSession,
@@ -9,16 +10,9 @@ const {
     completelyResetUser
 } = require('../lib/whatsapp');
 
-const WAITING_TIMEOUT =
-    2 * 60 * 1000;
+const WAITING_TIMEOUT = 2 * 60 * 1000;
 
-/*
-|--------------------------------------------------------------------------
-| GLOBAL STATE
-|--------------------------------------------------------------------------
-*/
-
-function getStates() {
+function getPairingStates() {
     if (!global.pairingStates) {
         global.pairingStates = {};
     }
@@ -26,1233 +20,658 @@ function getStates() {
     return global.pairingStates;
 }
 
-function getSessions() {
-    if (!global.sessions) {
-        global.sessions = {};
+function getState(userId) {
+    return getPairingStates()[String(userId)] || null;
+}
+
+function setState(userId, state) {
+    const states = getPairingStates();
+    const key = String(userId);
+
+    if (states[key]?.timeout) {
+        clearTimeout(states[key].timeout);
     }
-
-    return global.sessions;
-}
-
-/*
-|--------------------------------------------------------------------------
-| BASIC HELPERS
-|--------------------------------------------------------------------------
-*/
-
-function getUserId(ctx) {
-    return String(
-        ctx?.from?.id || ''
-    );
-}
-
-function getPairingState(userId) {
-    return (
-        getStates()[
-            String(userId)
-        ] || null
-    );
-}
-
-function setPairingState(
-    userId,
-    state
-) {
-    const states =
-        getStates();
-
-    const key =
-        String(userId);
 
     states[key] = {
         ...state,
-
-        userId: key,
-
-        updatedAt:
-            Date.now()
+        userId: key
     };
 
     return states[key];
 }
 
-function clearPairingState(
-    userId
-) {
-    const states =
-        getStates();
+function clearState(userId) {
+    const states = getPairingStates();
+    const key = String(userId);
 
-    const key =
-        String(userId);
+    const state = states[key];
 
-    const state =
-        states[key];
-
-    if (
-        state?.timeout
-    ) {
-        try {
-            clearTimeout(
-                state.timeout
-            );
-        } catch (_) {}
+    if (state?.timeout) {
+        clearTimeout(state.timeout);
     }
 
     delete states[key];
-
-    return state || null;
 }
 
-/*
-|--------------------------------------------------------------------------
-| TELEGRAM REPLY
-|--------------------------------------------------------------------------
-*/
+function refreshPairingTimeout(userId) {
+    const key = String(userId);
+    const state = getState(key);
 
-async function reply(
-    ctx,
-    text,
-    extra = {}
-) {
-    try {
-        return await ctx.reply(
-            String(text || ''),
-            extra
-        );
-    } catch (error) {
-        console.error(
-            '[PAIR TELEGRAM REPLY]',
-            error?.stack || error
-        );
-
-        return null;
-    }
-}
-
-/*
-|--------------------------------------------------------------------------
-| COPYABLE PAIRING CODE
-|--------------------------------------------------------------------------
-*/
-
-async function replyPairingCode(
-    ctx,
-    code
-) {
-    const cleanCode =
-        String(
-            code || ''
-        )
-            .trim()
-            .toUpperCase();
-
-    if (!cleanCode) {
-        return reply(
-            ctx,
-            '❌ WhatsApp did not return a pairing code.'
-        );
+    if (!state) {
+        return;
     }
 
-    /*
-     * Telegram HTML <code> makes the code easy to select/copy.
-     *
-     * We still provide a plain-text fallback if HTML parsing fails.
-     */
+    if (state.timeout) {
+        clearTimeout(state.timeout);
+    }
 
-    const escaped =
-        cleanCode
-            .replace(
-                /&/g,
-                '&amp;'
-            )
-            .replace(
-                /</g,
-                '&lt;'
-            )
-            .replace(
-                />/g,
-                '&gt;'
-            );
+    state.timeout = setTimeout(
+        async () => {
+            const current = getState(key);
 
-    try {
-        return await ctx.reply(
-            '🔐 <b>WhatsApp pairing code</b>\n\n' +
-
-            `<code>${escaped}</code>\n\n` +
-
-            '📱 On the WhatsApp phone:\n' +
-            '1. Open WhatsApp\n' +
-            '2. Open Linked Devices\n' +
-            '3. Choose Link a device\n' +
-            '4. Choose the phone-number linking option\n' +
-            '5. Enter the code above\n\n' +
-
-            '⏳ The code may expire.\n\n' +
-
-            '🛑 Use /stop if you want to cancel this pairing.',
-            {
-                parse_mode: 'HTML'
+            if (!current) {
+                return;
             }
-        );
-    } catch (error) {
-        console.error(
-            '[PAIR CODE HTML]',
-            error?.stack || error
-        );
 
-        return reply(
-            ctx,
-            '🔐 WhatsApp pairing code:\n\n' +
-            cleanCode +
-            '\n\n' +
+            try {
+                await completelyResetUser(
+                    key,
+                    {
+                        notify: false
+                    }
+                );
 
-            'Open WhatsApp → Linked Devices → Link a device → phone-number linking.\n\n' +
-
-            'Enter the code before it expires.'
-        );
-    }
+                if (global.bot) {
+                    await global.bot.telegram.sendMessage(
+                        key,
+                        '⏰ Pairing timed out.\n\n' +
+                        '🧹 The incomplete WhatsApp session was cleared.\n\n' +
+                        'Use /pair to start a fresh pairing.'
+                    );
+                }
+            } catch (error) {
+                console.error(
+                    `[PAIR] Timeout cleanup failed for ${key}:`,
+                    error
+                );
+            }
+        },
+        WAITING_TIMEOUT
+    );
 }
 
-/*
-|--------------------------------------------------------------------------
-| PHONE NUMBER NORMALIZATION
-|--------------------------------------------------------------------------
-*/
+function normalizePhoneNumber(input) {
+    let number = String(input || '')
+        .trim()
+        .replace(/[^\d+]/g, '');
 
-function normalizePhoneNumber(
-    input
-) {
-    let number =
-        cleanNumber(
-            input
-        );
+    if (!number) {
+        return '';
+    }
 
     /*
      * Convert:
      *
-     * 00 234...
-     *
-     * into:
-     *
-     * 234...
-     */
-
-    if (
-        number.startsWith('00')
-    ) {
-        number =
-            number.slice(2);
-    }
-
-    /*
-     * Nigerian local number:
-     *
-     * 08132538119
-     *
-     * becomes:
-     *
+     * +2348132538119
+     *      ↓
      * 2348132538119
      */
-
-    if (
-        number.length === 11 &&
-        number.startsWith('0')
-    ) {
-        number =
-            `234${number.slice(1)}`;
+    if (number.startsWith('+')) {
+        number = number.slice(1);
     }
 
     /*
-     * Baileys/WhatsApp phone-number
-     * format should contain digits only.
+     * International format with 00:
+     *
+     * 002348132538119
+     *      ↓
+     * 2348132538119
      */
+    if (number.startsWith('00')) {
+        number = number.slice(2);
+    }
 
+    /*
+     * Nigerian local format:
+     *
+     * 08132538119
+     *      ↓
+     * 2348132538119
+     */
     if (
-        !number ||
-        number.length < 7 ||
-        number.length > 15
+        number.startsWith('0') &&
+        number.length >= 10
     ) {
-        return null;
+        number =
+            '234' +
+            number.slice(1);
+    }
+
+    /*
+     * Final validation.
+     */
+    if (!/^\d{8,15}$/.test(number)) {
+        return '';
     }
 
     return number;
 }
 
-/*
-|--------------------------------------------------------------------------
-| PAIRING TIMEOUT
-|--------------------------------------------------------------------------
-*/
+async function replyPairingCode(ctx, code) {
+    const cleanCode = String(code || '')
+        .trim()
+        .toUpperCase();
 
-function refreshPairingTimeout(
-    userId
-) {
-    const states =
-        getStates();
-
-    const key =
-        String(userId);
-
-    const state =
-        states[key];
-
-    if (!state) {
-        return;
-    }
-
-    if (
-        state.timeout
-    ) {
-        try {
-            clearTimeout(
-                state.timeout
-            );
-        } catch (_) {}
-    }
-
-    const timeout =
-        setTimeout(
-            async () => {
-                const current =
-                    states[key];
-
-                if (!current) {
-                    return;
-                }
-
-                if (
-                    current.stage !==
-                        'waiting_number' &&
-                    current.stage !==
-                        'creating_session' &&
-                    current.stage !==
-                        'requesting_code' &&
-                    current.stage !==
-                        'waiting_connection'
-                ) {
-                    return;
-                }
-
-                /*
-                 * Complete cleanup, not merely state deletion.
-                 *
-                 * This prevents an unfinished socket from surviving
-                 * after the Telegram pairing state expires.
-                 */
-
-                try {
-                    await completelyResetUser(
-                        key,
-                        {
-                            notify: false,
-                            reason:
-                                'Pairing timeout.'
-                        }
-                    );
-                } catch (error) {
-                    console.error(
-                        '[PAIR TIMEOUT RESET]',
-                        error?.stack || error
-                    );
-                }
-
-                clearPairingState(
-                    key
-                );
-
-                const bot =
-                    global.bot;
-
-                if (!bot) {
-                    return;
-                }
-
-                try {
-                    await bot.telegram.sendMessage(
-                        key,
-                        '⌛ Pairing request expired.\n\n' +
-
-                        'No pairing was completed within the allowed time.\n\n' +
-
-                        '🧹 The temporary WhatsApp session was cleared.\n\n' +
-
-                        'Use /pair to start again.'
-                    );
-                } catch (error) {
-                    console.error(
-                        '[PAIR TIMEOUT TELEGRAM]',
-                        error?.stack || error
-                    );
-                }
-            },
-            WAITING_TIMEOUT
-        );
-
-    if (
-        typeof timeout.unref ===
-        'function'
-    ) {
-        timeout.unref();
-    }
-
-    state.timeout =
-        timeout;
-}
-
-/*
-|--------------------------------------------------------------------------
-| PAIRING ACTIVE CHECK
-|--------------------------------------------------------------------------
-*/
-
-function isPairingActive(
-    userId
-) {
-    const state =
-        getPairingState(
-            userId
-        );
-
-    if (!state) {
+    if (!cleanCode) {
         return false;
     }
 
-    if (
-        !state.active
-    ) {
-        return false;
-    }
-
-    if (
-        state.updatedAt &&
-        Date.now() -
-            state.updatedAt >
-            WAITING_TIMEOUT
-    ) {
-        clearPairingState(
-            userId
-        );
-
-        return false;
-    }
-
-    return true;
-}
-
-/*
-|--------------------------------------------------------------------------
-| /PAIR
-|--------------------------------------------------------------------------
-*/
-
-async function pairCommand(
-    ctx
-) {
-    const userId =
-        getUserId(ctx);
-
-    if (!userId) {
-        return;
-    }
-
-    const states =
-        getStates();
-
-    const sessions =
-        getSessions();
-
     /*
-     * ------------------------------------------------------------
-     * ALREADY PAIRING
-     * ------------------------------------------------------------
+     * Telegram HTML <code> makes the pairing code
+     * much easier to tap and copy.
      */
-
-    if (
-        isPairingActive(
-            userId
-        )
-    ) {
-        const state =
-            states[userId];
-
-        if (
-            state?.stage ===
-            'waiting_number'
-        ) {
-            return reply(
-                ctx,
-                '⏳ A pairing operation is already waiting for a number.\n\n' +
-
-                'Send the WhatsApp number here.\n\n' +
-
-                'Example:\n' +
-                '2349049979183\n\n' +
-
-                'Or use /stop to cancel it.'
-            );
-        }
-
-        if (
-            state?.stage ===
-            'creating_session'
-        ) {
-            return reply(
-                ctx,
-                '⏳ WhatsApp pairing is currently being prepared.\n\n' +
-                'Please wait or use /stop to cancel it.'
-            );
-        }
-
-        if (
-            state?.stage ===
-            'requesting_code'
-        ) {
-            return reply(
-                ctx,
-                '⏳ WhatsApp is currently requesting a pairing code.\n\n' +
-                'Please wait or use /stop to cancel it.'
-            );
-        }
-
-        if (
-            state?.stage ===
-            'waiting_connection'
-        ) {
-            return reply(
-                ctx,
-                '🔐 A pairing code has already been requested.\n\n' +
-                'Finish linking the WhatsApp account or use /stop to cancel it.'
-            );
-        }
-
-        return reply(
-            ctx,
-            '⏳ A pairing operation is already running.\n\n' +
-            'Use /stop to cancel it.'
-        );
-    }
-
-    /*
-     * ------------------------------------------------------------
-     * EXISTING SESSION
-     * ------------------------------------------------------------
-     *
-     * With the new architecture, /pair does NOT silently replace
-     * an active account.
-     *
-     * User should /stop first.
-     */
-
-    if (
-        sessions[userId]
-    ) {
-        return reply(
-            ctx,
-            '🟢 A WhatsApp session is already active.\n\n' +
-
-            'Use /status to inspect it.\n\n' +
-
-            'Use /stop to completely clear it.\n\n' +
-
-            'Then use /pair to link the same number or another number.'
-        );
-    }
-
-    /*
-     * ------------------------------------------------------------
-     * START PAIRING STATE
-     * ------------------------------------------------------------
-     */
-
-    const state =
-        setPairingState(
-            userId,
+    try {
+        await ctx.reply(
+            '🔐 <b>WhatsApp pairing code:</b>\n\n' +
+            `<code>${cleanCode}</code>\n\n` +
+            'Open WhatsApp on the phone you want to link and enter this code.\n\n' +
+            '⏳ Waiting for WhatsApp to finish linking...\n\n' +
+            'Use /stop to cancel this pairing.',
             {
-                active: true,
-
-                stage:
-                    'waiting_number',
-
-                phoneNumber:
-                    null,
-
-                pairingCode:
-                    null,
-
-                startedAt:
-                    Date.now(),
-
-                updatedAt:
-                    Date.now(),
-
-                timeout:
-                    null
+                parse_mode: 'HTML'
             }
         );
 
-    refreshPairingTimeout(
-        userId
+        return true;
+    } catch (error) {
+        console.error(
+            '[PAIR] HTML pairing-code message failed:',
+            error
+        );
+
+        /*
+         * Fallback in case Telegram rejects the HTML.
+         */
+        try {
+            await ctx.reply(
+                '🔐 WhatsApp pairing code:\n\n' +
+                cleanCode +
+                '\n\n' +
+                'Open WhatsApp on the phone you want to link and enter this code.\n\n' +
+                '⏳ Waiting for WhatsApp to finish linking...\n\n' +
+                'Use /stop to cancel this pairing.'
+            );
+
+            return true;
+        } catch (fallbackError) {
+            console.error(
+                '[PAIR] Pairing-code fallback failed:',
+                fallbackError
+            );
+
+            return false;
+        }
+    }
+}
+
+async function waitForPairingCode(
+    userId,
+    session,
+    timeoutMs = 15000
+) {
+    const key = String(userId);
+
+    const started = Date.now();
+
+    while (
+        Date.now() - started <
+        timeoutMs
+    ) {
+        /*
+         * Make sure this is still the current session.
+         */
+        const currentSession =
+            getWhatsAppSession(key);
+
+        if (
+            !currentSession ||
+            currentSession !== session ||
+            currentSession.stopping
+        ) {
+            return null;
+        }
+
+        /*
+         * First source:
+         * session.pairingCode
+         */
+        if (
+            currentSession.pairingCode
+        ) {
+            return String(
+                currentSession.pairingCode
+            )
+                .trim()
+                .toUpperCase();
+        }
+
+        /*
+         * Second source:
+         * global pairing state.
+         */
+        const state =
+            getState(key);
+
+        if (
+            state?.code
+        ) {
+            return String(
+                state.code
+            )
+                .trim()
+                .toUpperCase();
+        }
+
+        await sleep(250);
+    }
+
+    return null;
+}
+
+async function beginPairing(ctx) {
+    const userId = String(
+        ctx.from.id
     );
 
-    /*
-     * Keep the actual timeout reference in the state.
-     */
+    const existingState =
+        getState(userId);
 
-    state.timeout =
-        getStates()[
-            userId
-        ]?.timeout ||
-        null;
+    if (existingState) {
+        await ctx.reply(
+            '⚠️ You already have an active pairing request.\n\n' +
+            'Finish that pairing or use /stop to completely cancel it.'
+        );
 
-    return reply(
-        ctx,
+        return;
+    }
 
+    const existingSession =
+        getWhatsAppSession(userId);
+
+    if (
+        existingSession &&
+        !existingSession.stopping
+    ) {
+        if (existingSession.connected) {
+            await ctx.reply(
+                '✅ Your WhatsApp account is already connected.\n\n' +
+                'Use /stop first if you want to remove it and pair another number.'
+            );
+
+            return;
+        }
+
+        await ctx.reply(
+            '⚠️ A WhatsApp session is already being prepared.\n\n' +
+            'Use /stop to completely clear it before starting again.'
+        );
+
+        return;
+    }
+
+    setState(
+        userId,
+        {
+            stage: 'waiting_number',
+            createdAt: Date.now()
+        }
+    );
+
+    refreshPairingTimeout(userId);
+
+    await ctx.reply(
         '📱 <b>Send the WhatsApp phone number you want to pair.</b>\n\n' +
-
-        'Use international format without <code>+</code>.\n\n' +
-
-        'Example:\n' +
-        '<code>2349049979183</code>\n\n' +
-
-        'For a Nigerian number like:\n' +
-        '<code>09049979183</code>\n\n' +
-
-        'you can also send the local format.\n\n' +
-
-        'Send only the number.\n\n' +
-
-        '🛑 Use /stop to cancel.',
+        'Use international format without +.\n\n' +
+        '<b>Example:</b>\n' +
+        '<code>2348132538119</code>\n\n' +
+        'For a Nigerian number like <code>08132538119</code>, local format is also accepted.\n\n' +
+        'Send only the number.',
         {
             parse_mode: 'HTML'
         }
     );
 }
-
-/*
-|--------------------------------------------------------------------------
-| HANDLE NUMBER AFTER /PAIR
-|--------------------------------------------------------------------------
-*/
 
 async function handlePairNumber(
     ctx,
     rawNumber
 ) {
-    const userId =
-        getUserId(ctx);
-
-    if (!userId) {
-        return false;
-    }
-
-    const states =
-        getStates();
+    const userId = String(
+        ctx.from.id
+    );
 
     const state =
-        states[userId];
+        getState(userId);
 
-    /*
-     * Only accept a number while the user is specifically waiting
-     * for a number.
-     */
+    if (!state) {
+        return false;
+    }
 
     if (
-        !state ||
-        state.active !== true ||
         state.stage !==
-            'waiting_number'
+        'waiting_number'
     ) {
         return false;
     }
 
-    /*
-     * Stop the old number-entry timeout while we validate and
-     * create the session.
-     */
-
-    if (
-        state.timeout
-    ) {
-        try {
-            clearTimeout(
-                state.timeout
-            );
-        } catch (_) {}
-
-        state.timeout =
-            null;
-    }
-
-    /*
-     * ------------------------------------------------------------
-     * NORMALIZE NUMBER
-     * ------------------------------------------------------------
-     */
-
-    const number =
+    const phoneNumber =
         normalizePhoneNumber(
             rawNumber
         );
 
-    if (!number) {
-        refreshPairingTimeout(
-            userId
-        );
-
-        await reply(
-            ctx,
-            '❌ Invalid phone number.\n\n' +
-
-            'Send a valid WhatsApp number using digits only.\n\n' +
-
+    if (!phoneNumber) {
+        await ctx.reply(
+            '❌ Invalid WhatsApp number.\n\n' +
+            'Send the number using international format without +.\n\n' +
             'Example:\n' +
-            '2349049979183\n\n' +
-
-            'Do not include +.'
+            '2348132538119'
         );
 
-        return false;
+        return true;
     }
 
     /*
-     * ------------------------------------------------------------
-     * CHECK AGAIN FOR SESSION
-     * ------------------------------------------------------------
+     * Update state BEFORE creating the socket.
      */
-
-    const existingSession =
-        getWhatsAppSession(
-            userId
-        );
-
-    if (
-        existingSession
-    ) {
-        clearPairingState(
-            userId
-        );
-
-        return reply(
-            ctx,
-            '🟢 A WhatsApp session is already active.\n\n' +
-
-            'Use /stop first if you want to completely clear it.\n\n' +
-
-            'After that, /pair can be used with the same number or another number.'
-        );
-    }
-
-    /*
-     * ------------------------------------------------------------
-     * STORE NUMBER
-     * ------------------------------------------------------------
-     */
-
-    setPairingState(
+    setState(
         userId,
         {
-            ...state,
-
-            active: true,
-
-            stage:
-                'creating_session',
-
-            phoneNumber:
-                number,
-
-            pairingCode:
-                null,
-
-            timeout:
-                null
+            stage: 'creating_session',
+            phoneNumber,
+            createdAt:
+                state.createdAt
         }
     );
 
-    await reply(
-        ctx,
+    refreshPairingTimeout(userId);
 
-        '🔄 <b>Preparing WhatsApp pairing...</b>\n\n' +
-
-        `📱 Number: <code>${number}</code>\n\n` +
-
-        'Please wait.',
-        {
-            parse_mode: 'HTML'
-        }
+    await ctx.reply(
+        '📡 WhatsApp pairing has started.\n\n' +
+        `📱 Number: ${phoneNumber}\n\n` +
+        '🔄 Preparing a fresh WhatsApp session...\n\n' +
+        'Please wait.'
     );
-
-    /*
-     * ------------------------------------------------------------
-     * CLEAN ANY LEFTOVER DATA
-     * ------------------------------------------------------------
-     *
-     * This is a fresh pairing.
-     */
 
     try {
+        /*
+         * Remove any stale WhatsApp socket/auth first.
+         *
+         * This function intentionally does not delete the
+         * Telegram pairing state.
+         */
         await prepareFreshPairing(
             userId
         );
-    } catch (error) {
-        console.error(
-            '[PAIR PREPARE]',
-            error?.stack || error
-        );
-
-        clearPairingState(
-            userId
-        );
-
-        return reply(
-            ctx,
-            '❌ Could not prepare a fresh WhatsApp session.\n\n' +
-            'The pairing state was reset.\n\n' +
-            'Use /pair to try again.'
-        );
-    }
-
-    /*
-     * ------------------------------------------------------------
-     * CHECK WHETHER /STOP WAS USED
-     * ------------------------------------------------------------
-     */
-
-    const afterPrepare =
-        getPairingState(
-            userId
-        );
-
-    if (
-        !afterPrepare ||
-        afterPrepare.active !== true
-    ) {
-        return false;
-    }
-
-    /*
-     * ------------------------------------------------------------
-     * REQUESTING CODE
-     * ------------------------------------------------------------
-     */
-
-    setPairingState(
-        userId,
-        {
-            ...afterPrepare,
-
-            active: true,
-
-            stage:
-                'requesting_code',
-
-            phoneNumber:
-                number,
-
-            pairingCode:
-                null,
-
-            timeout:
-                null
-        }
-    );
-
-    try {
-        /*
-         * --------------------------------------------------------
-         * CREATE SOCKET + REQUEST CODE
-         * --------------------------------------------------------
-         */
-
-        const session =
-            await createWhatsAppSession(
-                userId,
-                number,
-                ctx,
-                {
-                    pairing: true
-                }
-            );
 
         /*
-         * --------------------------------------------------------
-         * CHECK FOR /STOP DURING CREATION
-         * --------------------------------------------------------
+         * Check whether /stop happened while cleanup
+         * was running.
          */
-
         const currentState =
-            getPairingState(
-                userId
-            );
+            getState(userId);
 
         if (
             !currentState ||
-            currentState.active !== true
+            currentState.stage ===
+            'cancelled'
         ) {
-            /*
-             * /stop may have happened while createWhatsAppSession
-             * was awaiting WhatsApp.
-             *
-             * Clean anything that might have appeared meanwhile.
-             */
-
-            try {
-                await completelyResetUser(
-                    userId,
-                    {
-                        notify: false,
-                        reason:
-                            'Pairing cancelled.'
-                    }
-                );
-            } catch (cleanupError) {
-                console.error(
-                    '[PAIR CANCEL CLEANUP]',
-                    cleanupError?.stack ||
-                    cleanupError
-                );
-            }
-
-            return false;
+            return true;
         }
 
-        /*
-         * --------------------------------------------------------
-         * SESSION CREATION FAILED
-         * --------------------------------------------------------
-         */
-
-        if (!session) {
-            clearPairingState(
-                userId
-            );
-
-            return reply(
-                ctx,
-                '❌ WhatsApp session could not be created.\n\n' +
-
-                'The temporary pairing state was cleared.\n\n' +
-
-                'Use /pair to try again.'
-            );
-        }
-
-        /*
-         * --------------------------------------------------------
-         * GET CODE
-         * --------------------------------------------------------
-         */
-
-        const pairingCode =
-            String(
-                session.pairingCode ||
-                ''
-            )
-                .trim()
-                .toUpperCase();
-
-        /*
-         * --------------------------------------------------------
-         * CODE EXISTS
-         * --------------------------------------------------------
-         */
-
-        if (
-            pairingCode
-        ) {
-            setPairingState(
-                userId,
-                {
-                    ...currentState,
-
-                    active: true,
-
-                    stage:
-                        'waiting_connection',
-
-                    phoneNumber:
-                        number,
-
-                    pairingCode,
-
-                    timeout:
-                        null
-                }
-            );
-
-            /*
-             * Give the user a fresh timeout while WhatsApp waits
-             * for the account to finish linking.
-             */
-
-            refreshPairingTimeout(
-                userId
-            );
-
-            return replyPairingCode(
-                ctx,
-                pairingCode
-            );
-        }
-
-        /*
-         * --------------------------------------------------------
-         * NO CODE
-         * --------------------------------------------------------
-         */
-
-        setPairingState(
+        setState(
             userId,
             {
-                ...currentState,
-
-                active: true,
-
-                stage:
-                    'waiting_connection',
-
-                phoneNumber:
-                    number,
-
-                pairingCode:
-                    null,
-
-                timeout:
-                    null
+                stage: 'requesting_code',
+                phoneNumber,
+                createdAt:
+                    currentState.createdAt
             }
         );
 
+        refreshPairingTimeout(userId);
+
+        /*
+         * Create the Baileys socket.
+         *
+         * createWhatsAppSession() itself requests the
+         * pairing code and stores it in:
+         *
+         * session.pairingCode
+         *
+         * and:
+         *
+         * pairingState.code
+         */
+        const session =
+            await createWhatsAppSession(
+                userId,
+                {
+                    pairing: true,
+                    phoneNumber
+                }
+            );
+
+        /*
+         * /stop could have been used while the socket
+         * was being created.
+         */
+        const afterCreate =
+            getState(userId);
+
+        if (
+            !afterCreate ||
+            afterCreate.stage ===
+            'cancelled'
+        ) {
+            await completelyResetUser(
+                userId,
+                {
+                    notify: false
+                }
+            );
+
+            return true;
+        }
+
+        /*
+         * Make sure the session returned by Baileys
+         * still belongs to this Telegram user.
+         */
+        if (!session) {
+            throw new Error(
+                'WhatsApp session was not returned.'
+            );
+        }
+
+        setState(
+            userId,
+            {
+                stage: 'waiting_code',
+                phoneNumber,
+                createdAt:
+                    afterCreate.createdAt
+            }
+        );
+
+        refreshPairingTimeout(userId);
+
+        /*
+         * Wait for the actual pairing code.
+         *
+         * This fixes the "No pairing code was returned yet"
+         * race condition where pair.js checked the session
+         * immediately before createWhatsAppSession had finished
+         * assigning session.pairingCode.
+         */
+        const code =
+            await waitForPairingCode(
+                userId,
+                session,
+                15000
+            );
+
+        /*
+         * Check cancellation again.
+         */
+        const finalState =
+            getState(userId);
+
+        if (
+            !finalState ||
+            finalState.stage ===
+            'cancelled'
+        ) {
+            return true;
+        }
+
+        if (!code) {
+            console.error(
+                `[PAIR] No pairing code returned for ${userId}.`
+            );
+
+            await completelyResetUser(
+                userId,
+                {
+                    notify: false
+                }
+            );
+
+            await ctx.reply(
+                '❌ WhatsApp did not return a pairing code.\n\n' +
+                'The incomplete session has been cleared.\n\n' +
+                'Use /pair to start a completely fresh attempt.'
+            );
+
+            return true;
+        }
+
+        /*
+         * Save it into Telegram pairing state too.
+         */
+        finalState.code =
+            code;
+
+        finalState.stage =
+            'waiting_connection';
+
+        finalState.codeGeneratedAt =
+            Date.now();
+
+        finalState.phoneNumber =
+            phoneNumber;
+
+        /*
+         * Refresh the timeout now that the code exists.
+         */
         refreshPairingTimeout(
             userId
         );
 
-        return reply(
+        await replyPairingCode(
             ctx,
-
-            '📡 WhatsApp pairing has started.\n\n' +
-
-            '⚠️ No pairing code was returned yet.\n\n' +
-
-            'Wait briefly and check WhatsApp.\n\n' +
-
-            'Use /stop to cancel the session.'
+            code
         );
 
+        return true;
     } catch (error) {
         console.error(
-            '[PAIR CREATE]',
-            error?.stack || error
+            `[PAIR] Pairing failed for ${userId}:`,
+            error
         );
 
         /*
-         * --------------------------------------------------------
-         * COMPLETE CLEANUP ON FAILURE
-         * --------------------------------------------------------
+         * Do not leave a half-created session behind.
          */
-
-        try {
-            await completelyResetUser(
-                userId,
-                {
-                    notify: false,
-                    reason:
-                        'Pairing failed.'
-                }
-            );
-        } catch (cleanupError) {
-            console.error(
-                '[PAIR FAILURE CLEANUP]',
-                cleanupError?.stack ||
-                cleanupError
-            );
-        }
-
-        clearPairingState(
-            userId
+        await completelyResetUser(
+            userId,
+            {
+                notify: false
+            }
         );
 
-        /*
-         * --------------------------------------------------------
-         * USER-FRIENDLY ERROR
-         * --------------------------------------------------------
-         */
-
-        const reason =
-            String(
-                error?.message ||
-                error?.output?.payload?.message ||
-                ''
-            );
-
-        let message =
-            '❌ Pairing failed.\n\n';
-
-        if (
-            /401|logged.?out|unauthorized/i
-                .test(reason)
-        ) {
-            message +=
-                'WhatsApp rejected the pairing session.\n\n';
-        } else if (
-            /timeout|timed out/i
-                .test(reason)
-        ) {
-            message +=
-                'The WhatsApp connection timed out.\n\n';
-        } else if (
-            /socket|connection/i
-                .test(reason)
-        ) {
-            message +=
-                'The WhatsApp connection could not be started.\n\n';
-        } else {
-            message +=
-                'The WhatsApp connection could not be started.\n\n';
-        }
-
-        message +=
-            '🧹 The temporary session and pairing state were cleared.\n\n' +
-
-            'You can use /pair again with the same number or another number.';
-
-        return reply(
-            ctx,
-            message
+        await ctx.reply(
+            '❌ Pairing failed.\n\n' +
+            'The WhatsApp connection could not be started.\n\n' +
+            '🧹 The pairing state and saved session have been completely reset.\n\n' +
+            'Use /pair to try again.'
         );
+
+        return true;
     }
 }
-
-/*
-|--------------------------------------------------------------------------
-| CANCEL PAIRING
-|--------------------------------------------------------------------------
-*/
 
 async function cancelPairing(
     userId
 ) {
-    const key =
-        String(
-            userId || ''
-        );
-
-    if (!key) {
-        return null;
-    }
+    const key = String(userId);
 
     const state =
-        getPairingState(
-            key
-        );
+        getState(key);
 
-    if (!state) {
-        return null;
+    /*
+     * Mark cancellation immediately.
+     *
+     * This is important because createWhatsAppSession()
+     * can still be waiting on Baileys.
+     */
+    if (state) {
+        state.stage =
+            'cancelled';
+
+        if (state.timeout) {
+            clearTimeout(
+                state.timeout
+            );
+
+            state.timeout = null;
+        }
     }
 
     /*
-     * Clear Telegram-side state immediately.
+     * Completely destroy the WhatsApp state.
      */
-
-    clearPairingState(
-        key
+    await completelyResetUser(
+        key,
+        {
+            notify: false
+        }
     );
 
-    /*
-     * Also clean a socket/auth directory if one was already created.
-     */
-
-    try {
-        await completelyResetUser(
-            key,
-            {
-                notify: false,
-                reason:
-                    'Pairing cancelled.'
-            }
-        );
-    } catch (error) {
-        console.error(
-            '[PAIR CANCEL RESET]',
-            error?.stack || error
-        );
-    }
-
-    return state;
+    return Boolean(state);
 }
 
-/*
-|--------------------------------------------------------------------------
-| PAIRING STATUS
-|--------------------------------------------------------------------------
-*/
-
-function getPairingStatus(
-    userId
-) {
+function getPairingStatus(userId) {
     const state =
-        getPairingState(
-            String(userId || '')
-        );
+        getState(userId);
 
     if (!state) {
         return null;
     }
 
     return {
-        active:
-            Boolean(
-                state.active
-            ),
+        ...state,
 
-        stage:
-            state.stage ||
-            null,
-
-        phoneNumber:
-            state.phoneNumber ||
-            null,
-
-        pairingCode:
-            state.pairingCode ||
-            null,
-
-        startedAt:
-            state.startedAt ||
-            null,
-
-        updatedAt:
-            state.updatedAt ||
-            null
+        /*
+         * Never expose the actual Timeout object.
+         */
+        timeout: undefined
     };
 }
 
-/*
-|--------------------------------------------------------------------------
-| CLEAR STATE ONLY
-|--------------------------------------------------------------------------
-|
-| Kept as a separate export because index.js and other parts of the
-| bot may need to clear the Telegram state without doing a full
-| WhatsApp reset during shutdown.
-|--------------------------------------------------------------------------
-*/
+module.exports = beginPairing;
 
-function clearPairingStateExport(
-    userId
-) {
-    return clearPairingState(
-        String(userId || '')
-    );
-}
-
-/*
-|--------------------------------------------------------------------------
-| EXPORTS
-|--------------------------------------------------------------------------
-*/
-
-module.exports =
-    pairCommand;
+module.exports.beginPairing =
+    beginPairing;
 
 module.exports.handlePairNumber =
     handlePairNumber;
@@ -1260,17 +679,11 @@ module.exports.handlePairNumber =
 module.exports.cancelPairing =
     cancelPairing;
 
-module.exports.clearPairingState =
-    clearPairingStateExport;
-
 module.exports.getPairingStatus =
     getPairingStatus;
 
 module.exports.normalizePhoneNumber =
     normalizePhoneNumber;
 
-module.exports.isPairingActive =
-    isPairingActive;
-
-module.exports.replyPairingCode =
-    replyPairingCode;
+module.exports.waitForPairingCode =
+    waitForPairingCode;
