@@ -1,50 +1,24 @@
 # SolvaX MD
 
-A Telegram-controlled WhatsApp bot using Baileys.
+Telegram-controlled WhatsApp bot built with Baileys.
 
 ## Setup
+1. Node.js 20+
+2. `npm install`
+3. Set `BOT_TOKEN` (recommended) or put the token in `config.json` as `telegramToken`.
+4. `npm start`
 
-1. Install Node.js 20+.
-2. Put the Telegram bot token in the environment as `BOT_TOKEN`, or use `telegramToken` in `config.json`.
-3. Run:
-
-```bash
-npm install
-npm start
-```
-
-On Railway, add `BOT_TOKEN` under Variables. The project contains `railway.json` and a `Procfile`.
+For Railway, attach a persistent volume and set `WA_SESSION_DIR` to its mount path so WhatsApp authentication survives restarts.
 
 ## Telegram
-
-- `/start`
-- `/help`
-- `/pair`
-- `/cancel`
-- `/status`
-- `/stop`
-
-For `/pair`, enter a WhatsApp number with country code, for example `2349012345678`. Nigerian local numbers such as `08012345678` are also accepted.
+`/start` `/help` `/pair` `/cancel` `/status` `/stop`
 
 ## WhatsApp
+Commands use `.`. The linked WhatsApp account is the only account allowed to issue bot commands. Group moderation commands still verify group permissions.
 
-The command prefix is `.`.
+Implemented: menu, ping, group info, tagall, tagadmin, add/kick/promote/demote, mute, anti-link/mention/view-once/bot configuration, image sticker conversion, YouTube search, lyrics/video search.
 
-`.menu`, `.ping`, `.sticker`, `.play`, `.video`, `.lyrics`, `.groupinfo`, `.tagall`, `.tagadmin`, `.add`, `.kick`, `.promote`, `.demote`, `.mute`, `.anti`, `.vv`.
+`.vv` deliberately does not bypass WhatsApp view-once privacy. YouTube commands return search results rather than downloading media.
 
-`.play` and `.video` perform YouTube searches; they do not download copyrighted media. `.lyrics` performs a lyrics/video search without reproducing copyrighted lyrics. `.vv` intentionally does not bypass view-once privacy controls.
-
-### Group controls
-
-- `.add`, `.kick`, `.promote`, `.demote`, `.mute`, `.anti`, and `.tagall` require group-admin permission.
-- The bot must be a group admin for moderation commands.
-- `.anti` removes links sent by non-admin members.
-- `.mute` prevents non-admin members from invoking bot commands while enabled.
-
-Private WhatsApp commands are restricted to the linked account. Group commands can be used by members, with admin-only commands protected by group permissions.
-
-## Session storage
-
-By default, Baileys authentication is stored in `sessions/`. For a persistent deployment, set `WA_SESSION_DIR` to a durable mounted directory/volume. A process restart should not intentionally delete authentication; `/stop`, `/cancel`, logout, and bad-session cleanup can remove authentication when appropriate.
-
-Never commit the `sessions/` directory, Telegram token, or WhatsApp credentials.
+## Security
+Never commit Telegram tokens or WhatsApp session files. Keep `sessions/` persistent but private.
