@@ -41,7 +41,7 @@ if (!BOT_TOKEN) {
 }
 
 // ============================================================
-// DATABASE (with write queue to prevent corruption)
+// DATABASE (with write queue)
 // ============================================================
 
 const DB_FILE = './database.json';
@@ -224,7 +224,7 @@ async function createWhatsAppSession(userId, number, telegramContext) {
         auth: state,
         printQRInTerminal: false,
         browser: [
-            'SolvaX MD',
+            'SolvaX MD Bot',
             'Chrome',
             '1.0.0'
         ],
@@ -308,16 +308,14 @@ async function createWhatsAppSession(userId, number, telegramContext) {
                 try {
                     await bot.telegram.sendMessage(
                         userId,
-                        '🔴 WhatsApp disconnected.\n\nUse /pair to link it again.'
+                        `🔴 Your WhatsApp was unlinked.\n\n` +
+                        `Device: ${number}\n` +
+                        `Use /pair to re‑link.`
                     );
                 } catch (e) {}
 
                 return;
             }
-
-            // ------------------------------------------------
-            // REAL RECONNECT
-            // ------------------------------------------------
 
             if (currentSession.reconnecting) {
                 return;
@@ -327,7 +325,7 @@ async function createWhatsAppSession(userId, number, telegramContext) {
             currentSession.state = 'connecting';
 
             console.log(
-                `♻️ WhatsApp connection closed. Reconnecting ${number}...`
+                `♻️ Reconnecting ${number}...`
             );
 
             try {
@@ -359,7 +357,7 @@ async function createWhatsAppSession(userId, number, telegramContext) {
     });
 
     // --------------------------------------------------------
-    // WHATSAPP MESSAGE HANDLER
+    // MESSAGE HANDLER (single source of truth)
     // --------------------------------------------------------
 
     sock.ev.on(
@@ -402,6 +400,10 @@ async function createWhatsAppSession(userId, number, telegramContext) {
 
                     if (!text) continue;
 
+                    console.log(
+                        `[MSG] ${text} from ${senderNumber}`
+                    );
+
                     enqueueCommand(
                         async () => {
                             await handleWhatsAppCommand(
@@ -429,7 +431,7 @@ async function createWhatsAppSession(userId, number, telegramContext) {
 }
 
 // ============================================================
-// TELEGRAM START
+// TELEGRAM COMMANDS
 // ============================================================
 
 bot.start(async ctx => {
@@ -446,10 +448,6 @@ bot.start(async ctx => {
         }
     );
 });
-
-// ============================================================
-// TELEGRAM HELP
-// ============================================================
 
 bot.help(async ctx => {
     const helpText =
@@ -526,10 +524,6 @@ clearwarns @tag
     );
 });
 
-// ============================================================
-// TELEGRAM /PAIR
-// ============================================================
-
 bot.command('pair', async ctx => {
     const userId = ctx.from.id;
 
@@ -549,9 +543,8 @@ bot.command('pair', async ctx => {
     }
 
     if (pairingStates[userId]) {
-        return ctx.reply(
-            '⏳ A pairing request is already waiting for your number.'
-        );
+        clearTimeout(pairingStates[userId].timeoutId);
+        delete pairingStates[userId];
     }
 
     await ctx.reply(
@@ -579,10 +572,6 @@ bot.command('pair', async ctx => {
         timeoutId
     };
 });
-
-// ============================================================
-// TELEGRAM TEXT HANDLER (receives the number)
-// ============================================================
 
 bot.on('text', async ctx => {
     const userId = ctx.from.id;
@@ -618,7 +607,6 @@ bot.on('text', async ctx => {
     clearTimeout(
         pairingStates[userId].timeoutId
     );
-
     delete pairingStates[userId];
 
     await ctx.reply(
@@ -626,10 +614,6 @@ bot.on('text', async ctx => {
     );
 
     try {
-        // ----------------------------------------------------
-        // CREATE SOCKET
-        // ----------------------------------------------------
-
         const sessionFolder = `auth_tg_${userId}`;
 
         const {
@@ -641,35 +625,26 @@ bot.on('text', async ctx => {
             auth: state,
             printQRInTerminal: false,
             browser: [
-                'Mac OS',
+                'SolvaX MD Bot',
                 'Chrome',
-                '10.15.7'
+                '1.0.0'
             ],
             markOnlineOnConnect: false,
             syncFullHistory: false,
-            // Helps with pairing
             patchMessageBeforeSending: true
         });
 
-        // Save credentials
         sock.ev.on('creds.update', saveCreds);
-
-        // ----------------------------------------------------
-        // REQUEST PAIRING CODE WITH DELAY + RETRY
-        // ----------------------------------------------------
 
         let code;
 
-        // Wait 1.5 seconds for the socket to stabilise
         await sleep(1500);
 
-        // First attempt
         try {
             code = await sock.requestPairingCode(clean);
             console.log(`[PAIR] Code generated: ${code}`);
         } catch (err) {
             console.log('[PAIR] First attempt failed, retrying...', err.message);
-            // Wait another 2 seconds then retry once
             await sleep(2000);
             try {
                 code = await sock.requestPairingCode(clean);
@@ -680,14 +655,9 @@ bot.on('text', async ctx => {
             }
         }
 
-        // If we still don't have a code, throw.
         if (!code) {
             throw new Error('No pairing code received.');
         }
-
-        // ----------------------------------------------------
-        // STORE SESSION
-        // ----------------------------------------------------
 
         sessions[userId] = {
             sock,
@@ -700,10 +670,7 @@ bot.on('text', async ctx => {
             stopped: false
         };
 
-        // ----------------------------------------------------
-        // CONNECTION EVENTS (to handle open/close)
-        // ----------------------------------------------------
-
+        // Connection events
         sock.ev.on('connection.update', async update => {
             const {
                 connection,
@@ -754,7 +721,9 @@ bot.on('text', async ctx => {
                     try {
                         await bot.telegram.sendMessage(
                             userId,
-                            '🔴 WhatsApp was logged out.\n\nUse /pair to link it again.'
+                            `🔴 Your WhatsApp was unlinked.\n\n` +
+                            `Device: ${clean}\n` +
+                            `Use /pair to re‑link.`
                         );
                     } catch (e) {}
 
@@ -794,10 +763,7 @@ bot.on('text', async ctx => {
             }
         });
 
-        // ----------------------------------------------------
-        // MESSAGE HANDLER
-        // ----------------------------------------------------
-
+        // Message handler (unique)
         sock.ev.on(
             'messages.upsert',
             async event => {
@@ -839,6 +805,10 @@ bot.on('text', async ctx => {
 
                         if (!messageText) continue;
 
+                        console.log(
+                            `[MSG] ${messageText} from ${senderNumber}`
+                        );
+
                         enqueueCommand(
                             async () => {
                                 await handleWhatsAppCommand(
@@ -861,10 +831,6 @@ bot.on('text', async ctx => {
                 }
             }
         );
-
-        // ----------------------------------------------------
-        // SEND THE PAIRING CODE TO TELEGRAM
-        // ----------------------------------------------------
 
         await ctx.reply(
             `🔑 *PAIRING CODE*\n\n` +
@@ -893,10 +859,6 @@ bot.on('text', async ctx => {
     }
 });
 
-// ============================================================
-// /STATUS
-// ============================================================
-
 bot.command('status', async ctx => {
     const userId = ctx.from.id;
 
@@ -917,7 +879,7 @@ bot.command('status', async ctx => {
         session.state === 'connected'
     ) {
         return ctx.reply(
-            `✅ WhatsApp is ONLINE.\n\n📱 Number: ${number}`
+            `✅ WhatsApp is FULLY CONNECTED and ready.\n\n📱 Number: ${number}`
         );
     }
 
@@ -934,10 +896,6 @@ bot.command('status', async ctx => {
     );
 });
 
-// ============================================================
-// /STOP
-// ============================================================
-
 bot.command('stop', async ctx => {
     const userId = ctx.from.id;
 
@@ -946,7 +904,7 @@ bot.command('stop', async ctx => {
 
     if (!session) {
         return ctx.reply(
-            '❌ No active WhatsApp session.'
+            '❌ No active WhatsApp session to disconnect.'
         );
     }
 
@@ -963,7 +921,7 @@ bot.command('stop', async ctx => {
     delete sessions[userId];
 
     await ctx.reply(
-        '✅ WhatsApp disconnected.'
+        '✅ WhatsApp disconnected successfully.'
     );
 });
 
@@ -982,6 +940,39 @@ async function handleWhatsAppCommand(
 ) {
     const text =
         rawText.toLowerCase();
+
+    // --------------------------------------------------------
+    // Define public commands (sent to group if in group)
+    // --------------------------------------------------------
+
+    const publicCommands = [
+        '.play',
+        '.video',
+        '.lyrics',
+        '.tagall',
+        '.tagadmin',
+        '.add',
+        '.kick',
+        '.promote',
+        '.demote',
+        '.mute',
+        '.lock',
+        '.unlock'
+    ];
+
+    // Determine where to send the reply
+    const command = text.split(' ')[0];
+    const isPublic =
+        publicCommands.includes(command) && isGroup;
+
+    const replyJid =
+        isPublic
+            ? sender
+            : (msg.key?.participant || sender);
+
+    console.log(
+        `[REPLY] Command: ${command}, isPublic: ${isPublic}, replyJid: ${replyJid}`
+    );
 
     // --------------------------------------------------------
     // HELPERS
@@ -1069,7 +1060,7 @@ async function handleWhatsAppCommand(
     ) {
         if (!AUTO_DELETE_LOADING) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text: loadingText
                 }
@@ -1078,7 +1069,7 @@ async function handleWhatsAppCommand(
 
         const loading =
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text: loadingText
                 }
@@ -1088,10 +1079,10 @@ async function handleWhatsAppCommand(
             async () => {
                 try {
                     await sock.sendMessage(
-                        sender,
+                        replyJid,
                         {
                             delete: {
-                                remoteJid: sender,
+                                remoteJid: replyJid,
                                 fromMe: true,
                                 id: loading.key.id
                             }
@@ -1106,7 +1097,7 @@ async function handleWhatsAppCommand(
     }
 
     // ========================================================
-    // .MENU
+    // .MENU (Private)
     // ========================================================
 
     if (text === '.menu') {
@@ -1142,7 +1133,7 @@ async function handleWhatsAppCommand(
 ╰┈┈〔 v11 │ SolvaX MD 〕┈┈╯`;
 
         await sock.sendMessage(
-            sender,
+            replyJid,
             { text: menu }
         );
 
@@ -1150,12 +1141,12 @@ async function handleWhatsAppCommand(
     }
 
     // ========================================================
-    // .PING
+    // .PING (Private)
     // ========================================================
 
     if (text === '.ping') {
         await sock.sendMessage(
-            sender,
+            replyJid,
             {
                 text:
                     '🏓 Pong!\n\nBot is alive.'
@@ -1166,7 +1157,7 @@ async function handleWhatsAppCommand(
     }
 
     // ========================================================
-    // .VV – VIEW ONCE (5 METHODS)
+    // .VV – VIEW ONCE (Private)
     // ========================================================
 
     if (text === '.vv') {
@@ -1179,12 +1170,10 @@ async function handleWhatsAppCommand(
             try {
                 let media = null;
 
-                // Method 1
                 if (method === 1) {
                     media = await sock.downloadMediaMessage(msg);
                 }
 
-                // Method 2
                 if (method === 2 && !media) {
                     const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
                     if (msgObj?.imageMessage?.url) {
@@ -1198,7 +1187,6 @@ async function handleWhatsAppCommand(
                     }
                 }
 
-                // Method 3
                 if (method === 3 && !media) {
                     const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
                     if (msgObj?.imageMessage?.mediaKey || msgObj?.videoMessage?.mediaKey) {
@@ -1206,7 +1194,6 @@ async function handleWhatsAppCommand(
                     }
                 }
 
-                // Method 4
                 if (method === 4 && !media) {
                     try {
                         const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
@@ -1225,7 +1212,6 @@ async function handleWhatsAppCommand(
                     } catch (e) {}
                 }
 
-                // Method 5
                 if (method === 5 && !media) {
                     media = await sock.downloadMediaMessage(msg);
                 }
@@ -1233,17 +1219,17 @@ async function handleWhatsAppCommand(
                 if (media) {
                     const msgObj = msg.message?.viewOnceMessage?.message || msg.message;
                     if (msgObj?.imageMessage) {
-                        await sock.sendMessage(sender, {
+                        await sock.sendMessage(replyJid, {
                             image: media,
                             caption: '🔓 View-once decrypted!'
                         });
                     } else if (msgObj?.videoMessage) {
-                        await sock.sendMessage(sender, {
+                        await sock.sendMessage(replyJid, {
                             video: media,
                             caption: '🔓 View-once decrypted!'
                         });
                     } else {
-                        await sock.sendMessage(sender, {
+                        await sock.sendMessage(replyJid, {
                             image: media,
                             caption: '🔓 View-once decrypted!'
                         });
@@ -1258,7 +1244,7 @@ async function handleWhatsAppCommand(
         }
 
         if (!success) {
-            await sock.sendMessage(sender, {
+            await sock.sendMessage(replyJid, {
                 text: '❌ Could not decrypt view-once.\n\nThis is a WhatsApp limitation.\nTry asking the sender to send normally.'
             });
         }
@@ -1267,7 +1253,7 @@ async function handleWhatsAppCommand(
     }
 
     // ========================================================
-    // .PLAY (MUSIC)
+    // .PLAY (Public)
     // ========================================================
 
     if (text.startsWith('.play ')) {
@@ -1278,7 +1264,7 @@ async function handleWhatsAppCommand(
 
         if (!song) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Usage: .play song name'
@@ -1293,7 +1279,6 @@ async function handleWhatsAppCommand(
         let success = false;
         let attempts = 0;
 
-        // Source 1: Ryzendesu API
         if (
             !success &&
             attempts < PLAY_SOURCES
@@ -1317,7 +1302,7 @@ async function handleWhatsAppCommand(
                         );
 
                     await sock.sendMessage(
-                        sender,
+                        replyJid,
                         {
                             audio: buffer,
                             mimetype:
@@ -1337,7 +1322,6 @@ async function handleWhatsAppCommand(
             }
         }
 
-        // Source 2: Vevioz API
         if (
             !success &&
             attempts < PLAY_SOURCES
@@ -1361,7 +1345,7 @@ async function handleWhatsAppCommand(
                         );
 
                     await sock.sendMessage(
-                        sender,
+                        replyJid,
                         {
                             audio: buffer,
                             mimetype:
@@ -1383,7 +1367,7 @@ async function handleWhatsAppCommand(
 
         if (!success) {
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '⚠️ Music source unavailable right now.\n\nTry again later.'
@@ -1395,7 +1379,7 @@ async function handleWhatsAppCommand(
     }
 
     // ========================================================
-    // .VIDEO
+    // .VIDEO (Public)
     // ========================================================
 
     if (text.startsWith('.video ')) {
@@ -1406,7 +1390,7 @@ async function handleWhatsAppCommand(
 
         if (!video) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Usage: .video video name'
@@ -1421,7 +1405,6 @@ async function handleWhatsAppCommand(
         let success = false;
         let attempts = 0;
 
-        // Source 1: Ryzendesu API
         if (
             !success &&
             attempts < PLAY_SOURCES
@@ -1445,7 +1428,7 @@ async function handleWhatsAppCommand(
                         );
 
                     await sock.sendMessage(
-                        sender,
+                        replyJid,
                         {
                             video: buffer,
                             mimetype:
@@ -1465,7 +1448,6 @@ async function handleWhatsAppCommand(
             }
         }
 
-        // Source 2: Vevioz API
         if (
             !success &&
             attempts < PLAY_SOURCES
@@ -1489,7 +1471,7 @@ async function handleWhatsAppCommand(
                         );
 
                     await sock.sendMessage(
-                        sender,
+                        replyJid,
                         {
                             video: buffer,
                             mimetype:
@@ -1511,7 +1493,7 @@ async function handleWhatsAppCommand(
 
         if (!success) {
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '⚠️ Video source unavailable right now.\n\nTry again later.'
@@ -1523,7 +1505,7 @@ async function handleWhatsAppCommand(
     }
 
     // ========================================================
-    // .STICKER
+    // .STICKER (Private)
     // ========================================================
 
     if (text === '.sticker') {
@@ -1539,7 +1521,7 @@ async function handleWhatsAppCommand(
 
             if (!media) {
                 return sock.sendMessage(
-                    sender,
+                    replyJid,
                     {
                         text:
                             '❌ Reply to an image with .sticker'
@@ -1553,14 +1535,14 @@ async function handleWhatsAppCommand(
                     .toBuffer();
 
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     sticker: webp
                 }
             );
         } catch (error) {
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Could not create sticker.'
@@ -1572,7 +1554,7 @@ async function handleWhatsAppCommand(
     }
 
     // ========================================================
-    // .LYRICS
+    // .LYRICS (Public)
     // ========================================================
 
     if (text.startsWith('.lyrics ')) {
@@ -1583,7 +1565,7 @@ async function handleWhatsAppCommand(
 
         if (!song) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Usage: .lyrics artist - song'
@@ -1611,7 +1593,7 @@ async function handleWhatsAppCommand(
 
             if (!artist) {
                 return sock.sendMessage(
-                    sender,
+                    replyJid,
                     {
                         text:
                             '❌ Use this format:\n.lyrics Artist - Song'
@@ -1630,7 +1612,7 @@ async function handleWhatsAppCommand(
 
             if (!data?.lyrics) {
                 return sock.sendMessage(
-                    sender,
+                    replyJid,
                     {
                         text:
                             '⚠️ Lyrics not found.'
@@ -1648,7 +1630,7 @@ async function handleWhatsAppCommand(
                     : lyrics;
 
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         `📜 ${song}\n\n${limitedLyrics}`
@@ -1657,7 +1639,7 @@ async function handleWhatsAppCommand(
 
         } catch (error) {
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '⚠️ Lyrics could not be found.'
@@ -1669,13 +1651,13 @@ async function handleWhatsAppCommand(
     }
 
     // ========================================================
-    // .GROUPINFO
+    // .GROUPINFO (Private)
     // ========================================================
 
     if (text === '.groupinfo') {
         if (!isGroup) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Use this command inside a group.'
@@ -1725,7 +1707,7 @@ Created: ${created}
 ${admins.join('\n') || 'None'}`;
 
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text: info
                 }
@@ -1733,7 +1715,7 @@ ${admins.join('\n') || 'None'}`;
 
         } catch (error) {
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '⚠️ Could not fetch group information.'
@@ -1756,13 +1738,13 @@ ${admins.join('\n') || 'None'}`;
     }
 
     // ========================================================
-    // .TAGALL
+    // .TAGALL (Public)
     // ========================================================
 
     if (text === '.tagall') {
         if (!isGroup) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Group only.'
@@ -1795,7 +1777,7 @@ ${admins.join('\n') || 'None'}`;
                     .join(' ');
 
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text: message,
                     mentions
@@ -1804,7 +1786,7 @@ ${admins.join('\n') || 'None'}`;
 
         } catch (error) {
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '⚠️ Could not tag members.'
@@ -1816,13 +1798,13 @@ ${admins.join('\n') || 'None'}`;
     }
 
     // ========================================================
-    // .TAGADMIN
+    // .TAGADMIN (Public)
     // ========================================================
 
     if (text === '.tagadmin') {
         if (!isGroup) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Group only.'
@@ -1836,7 +1818,7 @@ ${admins.join('\n') || 'None'}`;
 
             if (!admins.length) {
                 return sock.sendMessage(
-                    sender,
+                    replyJid,
                     {
                         text:
                             '❌ No admins found.'
@@ -1854,7 +1836,7 @@ ${admins.join('\n') || 'None'}`;
                     .join(' ');
 
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text: message,
                     mentions: admins
@@ -1863,7 +1845,7 @@ ${admins.join('\n') || 'None'}`;
 
         } catch (error) {
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '⚠️ Could not fetch admins.'
@@ -1875,13 +1857,13 @@ ${admins.join('\n') || 'None'}`;
     }
 
     // ========================================================
-    // .ADD
+    // .ADD (Public)
     // ========================================================
 
     if (text.startsWith('.add ')) {
         if (!isGroup) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Group only.'
@@ -1896,7 +1878,7 @@ ${admins.join('\n') || 'None'}`;
 
         if (!number) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Usage: .add 2349012345678'
@@ -1915,7 +1897,7 @@ ${admins.join('\n') || 'None'}`;
             );
 
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         `✅ ${number} processed.`
@@ -1924,7 +1906,7 @@ ${admins.join('\n') || 'None'}`;
 
         } catch (error) {
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         `❌ Failed: ${error.message}`
@@ -1950,13 +1932,13 @@ ${admins.join('\n') || 'None'}`;
     }
 
     // ========================================================
-    // .KICK
+    // .KICK (Public)
     // ========================================================
 
     if (text.startsWith('.kick ')) {
         if (!isGroup) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Group only.'
@@ -1969,7 +1951,7 @@ ${admins.join('\n') || 'None'}`;
 
         if (!mentioned.length) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Tag the person to remove.'
@@ -1991,7 +1973,7 @@ ${admins.join('\n') || 'None'}`;
             )
         ) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Cannot remove the owner.'
@@ -2010,7 +1992,7 @@ ${admins.join('\n') || 'None'}`;
             )
         ) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Cannot remove an admin.'
@@ -2026,7 +2008,7 @@ ${admins.join('\n') || 'None'}`;
             );
 
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '✅ User removed.'
@@ -2035,7 +2017,7 @@ ${admins.join('\n') || 'None'}`;
 
         } catch (error) {
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         `❌ Failed: ${error.message}`
@@ -2047,13 +2029,13 @@ ${admins.join('\n') || 'None'}`;
     }
 
     // ========================================================
-    // .PROMOTE
+    // .PROMOTE (Public)
     // ========================================================
 
     if (text.startsWith('.promote ')) {
         if (!isGroup) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Group only.'
@@ -2066,7 +2048,7 @@ ${admins.join('\n') || 'None'}`;
 
         if (!mentioned.length) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Tag the person to promote.'
@@ -2082,7 +2064,7 @@ ${admins.join('\n') || 'None'}`;
             );
 
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '✅ User promoted.'
@@ -2091,7 +2073,7 @@ ${admins.join('\n') || 'None'}`;
 
         } catch (error) {
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         `❌ Failed: ${error.message}`
@@ -2103,13 +2085,13 @@ ${admins.join('\n') || 'None'}`;
     }
 
     // ========================================================
-    // .DEMOTE
+    // .DEMOTE (Public)
     // ========================================================
 
     if (text.startsWith('.demote ')) {
         if (!isGroup) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Group only.'
@@ -2122,7 +2104,7 @@ ${admins.join('\n') || 'None'}`;
 
         if (!mentioned.length) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Tag the person to demote.'
@@ -2144,7 +2126,7 @@ ${admins.join('\n') || 'None'}`;
             )
         ) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Cannot demote the owner.'
@@ -2160,7 +2142,7 @@ ${admins.join('\n') || 'None'}`;
             );
 
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '✅ User demoted.'
@@ -2169,7 +2151,7 @@ ${admins.join('\n') || 'None'}`;
 
         } catch (error) {
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         `❌ Failed: ${error.message}`
@@ -2181,7 +2163,7 @@ ${admins.join('\n') || 'None'}`;
     }
 
     // ========================================================
-    // .MUTE ON / .LOCK
+    // .MUTE ON / .LOCK (Public)
     // ========================================================
 
     if (
@@ -2190,7 +2172,7 @@ ${admins.join('\n') || 'None'}`;
     ) {
         if (!isGroup) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Group only.'
@@ -2203,7 +2185,7 @@ ${admins.join('\n') || 'None'}`;
 
         if (!botAdmin) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Make the bot an admin first.'
@@ -2218,7 +2200,7 @@ ${admins.join('\n') || 'None'}`;
             );
 
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '🔒 Chat closed. Only admins can send messages.'
@@ -2227,7 +2209,7 @@ ${admins.join('\n') || 'None'}`;
 
         } catch (error) {
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         `❌ Failed: ${error.message}`
@@ -2239,7 +2221,7 @@ ${admins.join('\n') || 'None'}`;
     }
 
     // ========================================================
-    // .MUTE OFF / .UNLOCK
+    // .MUTE OFF / .UNLOCK (Public)
     // ========================================================
 
     if (
@@ -2248,7 +2230,7 @@ ${admins.join('\n') || 'None'}`;
     ) {
         if (!isGroup) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Group only.'
@@ -2261,7 +2243,7 @@ ${admins.join('\n') || 'None'}`;
 
         if (!botAdmin) {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '❌ Make the bot an admin first.'
@@ -2276,7 +2258,7 @@ ${admins.join('\n') || 'None'}`;
             );
 
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         '🔓 Chat opened. Everyone can send messages.'
@@ -2285,7 +2267,7 @@ ${admins.join('\n') || 'None'}`;
 
         } catch (error) {
             await sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         `❌ Failed: ${error.message}`
@@ -2345,7 +2327,7 @@ ${admins.join('\n') || 'None'}`;
 ╰─⚔`;
 
         await sock.sendMessage(
-            sender,
+            replyJid,
             {
                 text: panel
             }
@@ -2469,7 +2451,7 @@ ${admins.join('\n') || 'None'}`;
                 count > 100
             ) {
                 return sock.sendMessage(
-                    sender,
+                    replyJid,
                     {
                         text:
                             '❌ Warns must be between 1 and 100.'
@@ -2506,7 +2488,7 @@ ${admins.join('\n') || 'None'}`;
 
             if (!mentioned.length) {
                 return sock.sendMessage(
-                    sender,
+                    replyJid,
                     {
                         text:
                             `❌ Tag a user.\n\n.${type} clearwarns @tag`
@@ -2533,7 +2515,7 @@ ${admins.join('\n') || 'None'}`;
 
         else {
             return sock.sendMessage(
-                sender,
+                replyJid,
                 {
                     text:
                         `❌ Invalid ${type} option.`
@@ -2542,7 +2524,7 @@ ${admins.join('\n') || 'None'}`;
         }
 
         await sock.sendMessage(
-            sender,
+            replyJid,
             {
                 text:
                     `✅ ${title} settings updated.`
